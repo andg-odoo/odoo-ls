@@ -1522,6 +1522,57 @@ impl SyncOdoo {
         ModuleSymbol::get_xml_id(session.st(), module_key, id_split.last().unwrap()).unwrap_or_default()
     }
 
+    /**
+     * search the xml_ids matching a prefix, for completion, filtered while iterating as the
+     * odoo+enterprise trees hold huge amounts of them.
+     * A dotted prefix ("module.local") resolves the module directly, even out of the deps of the
+     * current module, so that it can be annotated as "require". An undotted prefix is matched on
+     * the name of the modules in the deps, as these positions take a 'module.id' value.
+     * `model_filter` keeps only the xml_ids of records of that model, e.g. res.groups.
+     * Returns (defining module, local id, whether the module is in the current deps).
+     * */
+    pub fn get_xml_ids_by_prefix(session: &SessionInfo, from_file: SourceFileKey, prefix: &str, model_filter: Option<&OYarn>) -> Vec<(ModuleKey, OYarn, bool)> {
+        let mut results = vec![];
+        if !session.st().get_entry(from_file).borrow().is_main() {
+            return results;
+        }
+        let Some(current_module) = session.st().find_module(from_file) else {
+            return results;
+        };
+        match prefix.split_once('.') {
+            Some((module_prefix, id_prefix)) => {
+                if let Some(module_key) = session.sync_odoo.modules.get(module_prefix).copied().and_then(|m| m.upgrade(session.st())) {
+                    let in_deps = ModuleSymbol::is_in_deps(session.st(), current_module, &session.st()[module_key].dir_name);
+                    SyncOdoo::collect_module_xml_ids(session, module_key, id_prefix, model_filter, in_deps, &mut results);
+                }
+            },
+            None => {
+                for module_wk in session.sync_odoo.modules.values() {
+                    let Some(module_key) = module_wk.upgrade(session.st()) else { continue };
+                    let dir_name = &session.st()[module_key].dir_name;
+                    if !dir_name.starts_with(prefix) || !ModuleSymbol::is_in_deps(session.st(), current_module, dir_name) {
+                        continue;
+                    }
+                    SyncOdoo::collect_module_xml_ids(session, module_key, "", model_filter, true, &mut results);
+                }
+            }
+        }
+        results
+    }
+
+    fn collect_module_xml_ids(session: &SessionInfo, module_key: ModuleKey, id_prefix: &str, model_filter: Option<&OYarn>, in_deps: bool, results: &mut Vec<(ModuleKey, OYarn, bool)>) {
+        for (local_id, xml_ids) in session.st()[module_key].xml_ids.iter().filter(|(local_id, _)| local_id.starts_with(id_prefix)) {
+            let matches = match model_filter {
+                None => xml_ids.iter_valid(session.st()).next().is_some(),
+                Some(model) => xml_ids.iter_valid(session.st()).any(|xml_id|
+                    matches!(xml_id, XmlId::XmlRecord(record_key) if session.st()[record_key].model.0 == *model)),
+            };
+            if matches {
+                results.push((module_key, local_id.clone(), in_deps));
+            }
+        }
+    }
+
     pub fn get_ts_dict(&mut self) -> Wk<SymbolKey> {
         if self.typeshed_weak_cache.dict.is_expired(&self.symbol_table) {
             self.typeshed_weak_cache.dict = self.get_symbol("", (&["builtins"], &["dict"]), u32::MAX).last().copied().unwrap().into();

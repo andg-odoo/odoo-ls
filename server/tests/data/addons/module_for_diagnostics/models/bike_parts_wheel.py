@@ -18,6 +18,7 @@ class BikesBike(models.Model):
 
     name = fields.Char(string='Wheel Name', required=True, translate=True)
     wheel_id = fields.Many2one('bike_parts.wheel', string='Wheel')
+    restricted = fields.Char(groups='base.group_user,!base.group_portal,module_for_diagnostics.group_DOES_NOT_EXIST') # OLS05054
     bike_weight = fields.Float(string='Bike Weight (kg)', compute='_compute_bike_weight', store=True)
 
     @api.depends('wheel_id.price')
@@ -27,7 +28,7 @@ class BikesBike(models.Model):
                 bike.bike_weight = bike.wheel_id.price * 0.5
             else:
                 bike.bike_weight = 0.0
-        self.env.ref('module_for_diagnostics.bike_wheel_DOES_NOT_EXIST') # TODO: OLS05001
+        self.env.ref('module_for_diagnostics.bike_wheel_DOES_NOT_EXIST') # OLS05001
         self.env.ref('bike_wheel_DOES_NOT_EXIST') # OLS05002
         self.env.ref('module_for_diagnostics.bike_wheel_6') # Ok
         self.env.ref('WRONG_MODULE.bike_wheel_6') # OLS05003
