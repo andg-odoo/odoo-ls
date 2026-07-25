@@ -685,7 +685,7 @@ impl FeaturesUtils {
     /// Given an Argument return its String representation
     /// Attempts to fetch the type hint to return `_arg: _arg_type`
     /// Otherwise just returns the argument name
-    fn argument_presentation(session: &mut SessionInfo, arg: &Argument) -> String {
+    pub fn argument_presentation(session: &mut SessionInfo, arg: &Argument) -> String {
         let arg_symbol = arg.symbol.upgrade(session.st()).unwrap();
         let arg_name = session.st()[arg_symbol].name.clone();
         match arg.annotation.as_ref() {

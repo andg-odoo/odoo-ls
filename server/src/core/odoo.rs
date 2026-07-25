@@ -26,6 +26,7 @@ use crate::features::declaration::DeclarationFeature;
 use crate::features::completion::CompletionFeature;
 use crate::features::definition::DefinitionFeature;
 use crate::features::hover::HoverFeature;
+use crate::features::signature_help::SignatureHelpFeature;
 use crate::progress_reporter::{ProgressReporterPercentage, ProgressReporterRemaining};
 use crate::threads::{SessionInfo, ThreadMessage, TsServerDiagnostics};
 use crate::features::semantic_tokens::SemanticTokensFeature;
@@ -1918,6 +1919,52 @@ impl Odoo {
                         return Ok(HoverFeature::hover_js(session, &file_info.borrow().uri, params.text_document_position_params.position.line, params.text_document_position_params.position.character));
                     }
                 }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn handle_signature_help(session: &mut SessionInfo, params: SignatureHelpParams) -> Result<Option<SignatureHelp>, ResponseError> {
+        if session.sync_odoo.state_init == InitState::NOT_READY {
+            return Ok(None);
+        }
+        let uri = &params.text_document_position_params.text_document.uri;
+        let path = match uri.scheme().map(|scheme| scheme.to_lowercase()) {
+            Some(schema) if schema == "file" => {
+                if [".py", ".pyi"].iter().all(|ext| !uri.to_string().ends_with(ext)) {
+                    return Ok(None);
+                }
+                match uri.to_file_path() {
+                    Ok(path) => path.sanitize(),
+                    Err(error) => return Err(
+                        ResponseError {
+                            code: ErrorCode::InvalidParams as i32,
+                            message: format!("Invalid file URI: {}: {}", **uri, error),
+                            data: None,
+                        }
+                    ),
+                }
+            },
+            Some(schema) if schema == "untitled" => uri.to_string(),
+            _ => return Ok(None),
+        };
+        let Some(file_symbol) = SyncOdoo::get_symbol_of_opened_file(session, Path::new(&path)) else {
+            return Ok(None);
+        };
+        if SyncOdoo::is_non_main_manifest_file(session.st(), file_symbol, Path::new(&path)) {
+            //If the file is not in main entry, and is a manifest file, we skip it
+            return Ok(None);
+        }
+        //keep the file manager borrow to this statement, rebuilds further down borrow it again
+        let file_info = session.sync_odoo.get_file_mgr().borrow_mut().get_file_info(&path);
+        if let Some(file_info) = file_info {
+            if !file_info.borrow().file_info_ast.borrow().ast.is_built() {
+                file_info.borrow_mut().prepare_ast(session);
+            }
+            let ast_type = file_info.borrow().file_info_ast.borrow().ast.clone();
+            if matches!(ast_type, Ast::PythonAst(_)) {
+                let Position { line, character } = params.text_document_position_params.position;
+                return Ok(SignatureHelpFeature::signature_help_python(session, file_symbol, &file_info, line, character));
             }
         }
         Ok(None)
