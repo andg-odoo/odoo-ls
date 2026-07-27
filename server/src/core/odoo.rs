@@ -1967,9 +1967,8 @@ impl Odoo {
                         return Ok(Some(SemanticTokensResult::Tokens(tokens)));
                     },
                     Ast::XmlAst => {
-                        if let Some(tokens) = owl_virtual::semantic_tokens_xml(session, &file_info) {
-                            return Ok(Some(SemanticTokensResult::Tokens(tokens)));
-                        }
+                        let tokens = SemanticTokensFeature::tokens_xml(session, file_symbol, &file_info);
+                        return Ok(Some(SemanticTokensResult::Tokens(tokens)));
                     },
                     _ => {},
                 }

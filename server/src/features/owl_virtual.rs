@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use lsp_types::{
     CompletionItem, GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent,
-    MarkupKind, Position, Range, SemanticTokens,
+    MarkupKind, Position, Range,
 };
 use ruff_source_file::{LineIndex, PositionEncoding};
 
@@ -26,7 +26,7 @@ use crate::features::owl_component_utils::{self, template_reference_resolves};
 use crate::core::tsserver_bridge::{ts_to_lsp_location, TsLocation, TsServerBridge};
 use crate::features::owl_expr::{compile_owl_expr, interp_chunk_ranges, this_token_at};
 use crate::features::owl_xml_utils::{TEMPLATE_NAME_ATTRS, component_tag_name_range, is_owl_expression_attr, is_owl_interpolation_attr, is_prop_expr_attr, tag_is_component};
-use crate::features::semantic_tokens::{SemanticTokensFeature, TokMod, TokType, U16ToByte};
+use crate::features::semantic_tokens::{TokMod, TokType, U16ToByte};
 use crate::threads::SessionInfo;
 use crate::utils::HashMap;
 
@@ -236,12 +236,9 @@ pub(crate) fn shim_to_real(shim_path: &str) -> String {
     format!("{stem}.js")
 }
 
-/// Semantic tokens for an XML OWL-template file: template-name tokens (in-house, works
-/// without tsserver) merged with JS-expression tokens (delegated to tsserver via the
-/// virtual docs). `None` when neither source produced a token.
-pub fn semantic_tokens_xml(session: &mut SessionInfo, file_info: &Rc<RefCell<FileInfo>>) -> Option<SemanticTokens> {
+/// OWL template-name and JS-expression tokens of an XML file, appended to `raw_tokens`.
+pub fn collect_semantic_tokens_xml(session: &mut SessionInfo, file_info: &Rc<RefCell<FileInfo>>, raw_tokens: &mut Vec<(Range, u32, u32)>) {
     let encoding = session.sync_odoo.encoding;
-    let mut raw_tokens: Vec<(Range, u32, u32)> = vec![];
 
     // 1. Template-name tokens. Independent of tsserver: we only need to parse the XML.
     let xml = {
@@ -278,14 +275,9 @@ pub fn semantic_tokens_xml(session: &mut SessionInfo, file_info: &Rc<RefCell<Fil
         for doc in &docs {
             let Some(bridge) = session.sync_odoo.tsserver_bridge.as_mut() else { break };
             let spans = bridge.get_semantic_tokens(&doc.virtual_path);
-            remap_spans_to_xml(doc, spans, file_info, encoding, &mut raw_tokens);
+            remap_spans_to_xml(doc, spans, file_info, encoding, raw_tokens);
         }
     }
-
-    if raw_tokens.is_empty() {
-        return None;
-    }
-    Some(SemanticTokensFeature::encode(raw_tokens))
 }
 
 /// Collect every template-name attribute value as `(xml_byte_range, is_declaration)` —

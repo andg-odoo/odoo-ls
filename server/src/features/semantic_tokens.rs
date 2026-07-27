@@ -12,6 +12,8 @@ use crate::core::symbols::symbol_keys::{SourceFileKey, SymbolKey};
 use crate::features::ast_utils::AstUtils;
 use crate::features::features_utils::{FeaturesUtils, SegmentPick, StringResolution};
 use crate::features::owl_component_utils::template_reference_resolves;
+use crate::features::owl_virtual;
+use crate::features::xml_ast_utils::{XmlAstUtils, XmlRef, XmlRefKind};
 use crate::threads::SessionInfo;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -183,6 +185,35 @@ impl SemanticTokensFeature {
         }
 
         Self::encode(raw)
+    }
+
+    /// Semantic tokens for an XML file, the data-XML references merged with the OWL ones.
+    pub fn tokens_xml(session: &mut SessionInfo, file_symbol: SourceFileKey, file_info: &Rc<RefCell<FileInfo>>) -> SemanticTokens {
+        let mut raw = Self::data_xml_tokens(session, file_symbol, file_info);
+        owl_virtual::collect_semantic_tokens_xml(session, file_info, &mut raw);
+        Self::encode(raw)
+    }
+
+    /// Tokens for the data-XML references of a file, coloured exactly when they resolve.
+    fn data_xml_tokens(session: &mut SessionInfo, file_symbol: SourceFileKey, file_info: &Rc<RefCell<FileInfo>>) -> Vec<(Range, u32, u32)> {
+        let encoding = session.sync_odoo.encoding;
+        let content = {
+            let fi = file_info.borrow();
+            let fia = fi.file_info_ast.borrow();
+            fia.text_document.as_ref().map(|td| td.contents().to_string())
+        };
+        let Some(content) = content else { return vec![] };
+        let Ok(document) = roxmltree::Document::parse(&content) else { return vec![] };
+
+        let mut raw = vec![];
+        for xml_ref in XmlAstUtils::collect_refs(session, file_symbol, document.root_element(), true) {
+            let Some((token_type, modifiers)) = classify_xml_ref(session, &xml_ref) else {
+                continue;
+            };
+            let range = file_info.borrow().std_range_to_range(&xml_ref.range, encoding);
+            raw.push((range, token_type, modifiers));
+        }
+        raw
     }
 
     /// `type` tokens for `static template = "module.name"` strings. A template *reference*
@@ -421,6 +452,23 @@ impl<'a, 'b, 's> Visitor<'a> for SemanticTokenVisitor<'a, 'b, 's> {
             self.visit_arguments(&call.arguments);
             self.enclosing_call = prev;
         }
+    }
+}
+
+/// Token for a resolved XML reference, or `None` when it resolved to nothing.
+fn classify_xml_ref(session: &mut SessionInfo, xml_ref: &XmlRef) -> Option<(u32, u32)> {
+    if xml_ref.symbols.is_empty() {
+        return None;
+    }
+    match xml_ref.kind {
+        XmlRefKind::Model | XmlRefKind::XmlId => Some((TokType::Class as u32, 0)),
+        XmlRefKind::XmlIdDeclaration => Some((TokType::Class as u32, TokMod::Declaration.bit())),
+        // A field declared in XML has no python symbol to classify and reads as a property.
+        XmlRefKind::Member => Some(
+            xml_ref.symbols.iter()
+                .find_map(|&key| classify(session, key, TokenOrigin::Attr))
+                .unwrap_or((TokType::Property as u32, 0))
+        ),
     }
 }
 
