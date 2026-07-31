@@ -9,7 +9,7 @@ use crate::core::diagnostics::{create_diagnostic, DiagnosticCode};
 use crate::core::evaluation_context::{ContextKey, ContextValue};
 use crate::core::symbols::storage::SymbolTable;
 use crate::core::symbols::storage::xml::xml_field_symbol::XmlFieldName;
-use crate::core::symbols::symbol_keys::{ClassKey, ModelSymbolKey, ModuleKey, SourceFileKey, SymbolKey};
+use crate::core::symbols::symbol_keys::{ClassKey, ModelSymbolKey, ModuleKey, SourceFileKey, SymbolKey, XmlId};
 use crate::{constants::*, oyarn};
 use crate::core::odoo::SyncOdoo;
 use crate::core::symbols::ModuleSymbol;
@@ -484,7 +484,8 @@ impl PythonValidator {
                         && let Some(file_symbol) = session.st().get_file(class.into()) {
                         // Entries may be negated with '!', and '.' is NO_ACCESS, not an xml_id
                         let missing_groups = groups_value.split(',').map(|group| group.trim().trim_start_matches('!')).filter(|group| !group.is_empty() && *group != ".")
-                            .filter(|group| SyncOdoo::get_xml_ids(session, file_symbol, group, &(0..0), &mut vec![]).iter_valid(session.st()).next().is_none())
+                            .filter(|group| !SyncOdoo::get_xml_ids(session, file_symbol, group, &(0..0), &mut vec![]).iter_valid(session.st())
+                                .any(|xml_id| matches!(xml_id, XmlId::XmlRecord(record_key) if session.st()[record_key].model.0 == "res.groups")))
                             .collect::<Vec<_>>();
                         if !missing_groups.is_empty()
                             && let Some(diagnostic_base) = create_diagnostic(session, DiagnosticCode::OLS05054, &[&missing_groups.join(", ")]) {

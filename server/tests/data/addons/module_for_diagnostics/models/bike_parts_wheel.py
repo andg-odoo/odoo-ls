@@ -20,6 +20,7 @@ class BikesBike(models.Model):
     wheel_id = fields.Many2one('bike_parts.wheel', string='Wheel')
     restricted = fields.Char(groups='base.group_user,!base.group_portal,module_for_diagnostics.group_DOES_NOT_EXIST') # OLS05054
     hidden = fields.Char(groups='.') # Ok, odoo.fields.NO_ACCESS
+    not_a_group = fields.Char(groups='module_for_diagnostics.bike_1') # OLS05054
     bike_weight = fields.Float(string='Bike Weight (kg)', compute='_compute_bike_weight', store=True)
 
     @api.depends('wheel_id.price')
