@@ -482,8 +482,8 @@ impl PythonValidator {
                     if let Some(groups_value) = eval_weak.get_weak().context.get(ContextKey::Groups).map(ContextValue::as_str)
                         && let Some(groups_arg_range) = eval_weak.get_weak().context.get(ContextKey::GroupsArgRange).map(|ctx_val| ctx_val.as_text_range())
                         && let Some(file_symbol) = session.st().get_file(class.into()) {
-                        // Entries may be negated with a leading '!' (see odoo.tools.set_expression)
-                        let missing_groups = groups_value.split(',').map(|group| group.trim().trim_start_matches('!')).filter(|group| !group.is_empty())
+                        // Entries may be negated with '!', and '.' is NO_ACCESS, not an xml_id
+                        let missing_groups = groups_value.split(',').map(|group| group.trim().trim_start_matches('!')).filter(|group| !group.is_empty() && *group != ".")
                             .filter(|group| SyncOdoo::get_xml_ids(session, file_symbol, group, &(0..0), &mut vec![]).iter_valid(session.st()).next().is_none())
                             .collect::<Vec<_>>();
                         if !missing_groups.is_empty()

@@ -1369,7 +1369,11 @@ impl PythonArchEvalHooks {
             return None;
         }
         let module_key = module.unwrap().upgrade(session.st())?;
-        if in_validation && !xml_id.is_empty() && !xml_id.contains('.') {
+        // ir.model.data entries built by the registry, never declared in the sources
+        let is_registry_generated = (module_name == "base" && xml_id.starts_with("module_"))
+            || xml_id.starts_with("selection__")
+            || xml_id.strip_prefix("field_").is_some_and(|field| field.contains("__"));
+        if in_validation && !is_registry_generated && !xml_id.is_empty() && !xml_id.contains('.') {
             let is_known = ModuleSymbol::get_xml_id(session.st(), module_key, &xml_id)
                 .is_some_and(|xml_ids| xml_ids.iter_valid(session.st()).next().is_some());
             if !is_known && let Some(diagnostic) = create_diagnostic(session, DiagnosticCode::OLS05001, &[]) {
