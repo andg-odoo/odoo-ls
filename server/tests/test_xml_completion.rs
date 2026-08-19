@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use lsp_types::{CompletionItem, CompletionParams, CompletionTextEdit, CompletionResponse, PartialResultParams, Position, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
+use lsp_types::{CompletionItem, CompletionItemKind, CompletionParams, CompletionTextEdit, CompletionResponse, PartialResultParams, Position, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
 use odoo_ls_server::core::{file_mgr::FileMgr, odoo::Odoo};
 use odoo_ls_server::threads::SessionInfo;
 use odoo_ls_server::utils::PathSanitizer;
@@ -192,4 +192,34 @@ fn test_xml_completion_in_unparsable_document() {
     set_content(&mut session, &path, broken);
     assert_eq!(labels(&mut session, &path, broken, "<field name=\"amo"), well_formed);
     assert_eq!(well_formed, vec!["amount".to_string()]);
+}
+
+/// A method reaches an attribute value bare, with the private and dunder ones ranked last.
+#[test]
+fn test_xml_completion_button_methods() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    let (items, _) = complete(&mut session, &path, position_after(&content, r#"<button type="object" name=""#));
+    let synthetic = items.iter().filter(|item| item.label.starts_with('<') && item.label.ends_with('>')).collect::<Vec<_>>();
+    assert!(synthetic.is_empty(), "a name in angle brackets cannot be typed in an attribute, got: {synthetic:?}");
+
+    let mut sort_text = |needle: &str, label: &str| {
+        let (items, _) = complete(&mut session, &path, position_after(&content, needle));
+        let item = items.iter().find(|item| item.label == label).unwrap_or_else(|| panic!("{label} not offered, got: {items:?}"));
+        item.sort_text.clone().unwrap_or_else(|| panic!("{label} has no sort text"))
+    };
+    let public = sort_text(r#"<button name="action_completion_co"#, "action_completion_confirm");
+    let private = sort_text(r#"<button name="_completion_p"#, "_completion_private");
+    let dunder = sort_text(r#"<button name="__completion_d"#, "__completion_dunder__");
+    assert!(public < private, "a public method sorts before a private one, got {public} and {private}");
+    assert!(private < dunder, "a private method sorts before a dunder one, got {private} and {dunder}");
+
+    let (items, _) = complete(&mut session, &path, position_after(&content, r#"<button name="action_completion_co"#));
+    let item = &items[0];
+    assert!(!matches!(item.kind, Some(CompletionItemKind::METHOD) | Some(CompletionItemKind::FUNCTION)), "a callable kind makes the client insert parentheses");
+    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.clone() else { panic!("expected a text edit") };
+    assert_eq!(edit.new_text, "action_completion_confirm");
 }

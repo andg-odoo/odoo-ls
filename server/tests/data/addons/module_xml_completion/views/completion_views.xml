@@ -13,6 +13,9 @@
                 <field name="group_id" ref="base.group_us"/>
                 <field name="partner_id" ref="base.group_us"/>
                 <button name="action_completion_co" type="object"/>
+                <button name="_completion_p" type="object"/>
+                <button name="__completion_d" type="object"/>
+                <button type="object" name=""/>
                 <group groups="base.group_user,!base.group_us"/>
             </form>
         </field>
