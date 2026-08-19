@@ -38,6 +38,8 @@ pub enum ContextKey {
     FieldParent,
     GroupExpand,
     GroupExpandArgRange,
+    Groups,
+    GroupsArgRange,
     InitStorage,
     InitStorageArgRange,
     IsAttrOfInstance,
