@@ -247,6 +247,35 @@ impl XmlAstUtils {
         }
     }
 
+    /// Scope in effect for `node`, rebuilt by descending the ancestors from the document root.
+    pub fn scope_at<'a>(session: &mut SessionInfo, node: &Node<'a, '_>, from_module: Option<ModuleKey>, on_dep_only: bool) -> XmlScope<'a> {
+        let mut ancestors = node.ancestors().filter(|ancestor| ancestor.is_element()).collect::<Vec<_>>();
+        ancestors.reverse();
+        // The attributes of `node` itself are resolved in the scope of its parent.
+        ancestors.pop();
+        let mut scope = XmlScope::default();
+        for ancestor in ancestors {
+            match ancestor.tag_name().name() {
+                "record" => {
+                    if let Some(model) = ancestor.attribute("model") {
+                        scope.record_model = ModelScope::Known(Rc::from(model));
+                    }
+                    if scope.record_model.known() == Some("ir.ui.view") {
+                        scope.view_target_model = XmlAstUtils::view_target_model(&ancestor);
+                    }
+                },
+                "field" | "groupby" => {
+                    scope.field_name = ancestor.attribute("name");
+                    if let Some(model_scope) = XmlAstUtils::child_model_scope(session, &ancestor, &scope, from_module, on_dep_only) {
+                        scope.record_model = model_scope;
+                    }
+                },
+                _ => {},
+            }
+        }
+        scope
+    }
+
     /// Model the children of a `<field>`/`<groupby>` resolve against, when it differs.
     pub fn child_model_scope<'a>(session: &mut SessionInfo, node: &Node<'a, '_>, scope: &XmlScope<'a>, from_module: Option<ModuleKey>, on_dep_only: bool) -> Option<ModelScope> {
         let model_name = scope.record_model.known()?;

@@ -18,6 +18,7 @@ pub mod semantic_tokens;
 pub mod signature_help;
 pub mod workspace_symbols;
 pub mod xml_ast_utils;
+pub mod xml_completion;
 pub mod owl_xml_utils;
 pub mod owl_component_utils;
 pub mod tsserver_completion;
