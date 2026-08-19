@@ -641,7 +641,8 @@ impl FeaturesUtils {
             let context = &eval_symbol.get_weak().context;
             let evaluation_ptrs = SymbolTable::follow_ref(&eval_symbol, session, Some(context), false, false, None, None);
             let symbol_type = symbol.typ();
-            let symbol_name = session.st().name(symbol).clone();
+            // Templates, menu items and assets carry an xml id, not a name, and `name` panics
+            let symbol_name = session.st().repr(symbol);
             let from_module = session.st().find_module(symbol);
             let sym_type_tag = FeaturesUtils::get_type_symbol_tag(&session.sync_odoo.symbol_table, symbol);
             let return_types: Vec<TypeInfo> = evaluation_ptrs.iter().map(|eval| FeaturesUtils::get_inferred_types(session, eval, Some(context), &symbol_type)).unique().collect();

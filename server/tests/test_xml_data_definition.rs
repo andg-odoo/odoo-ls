@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use lsp_types::{GotoDefinitionParams, GotoDefinitionResponse, PartialResultParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
+use lsp_types::{GotoDefinitionParams, GotoDefinitionResponse, HoverParams, PartialResultParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
 use odoo_ls_server::{core::{file_mgr::FileMgr, odoo::Odoo}, threads::SessionInfo, utils::{PathSanitizer, ToFilePath}};
 
 mod setup;
@@ -8,15 +8,19 @@ mod test_utils;
 
 use test_utils::{line_of, position_after};
 
+fn views_path() -> String {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests").join("data").join("addons")
+        .join("module_xml_completion").join("views").join("completion_views.xml")
+        .sanitize()
+}
+
 /// `<menuitem>` and `<template>` declare xml ids too, and are navigated to like a `<record>`.
 #[test]
 fn test_xml_data_definition() {
     let (mut odoo, config) = setup::setup::setup_server(true);
     let mut session = setup::setup::create_init_session(&mut odoo, config);
-    let views = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests").join("data").join("addons")
-        .join("module_xml_completion").join("views").join("completion_views.xml")
-        .sanitize();
+    let views = views_path();
     let content = std::fs::read_to_string(&views).unwrap();
 
     assert_definition(
@@ -48,4 +52,30 @@ fn assert_definition(session: &mut SessionInfo, path: &str, position: Position, 
         .map(|link| (link.target_uri.to_file_path().unwrap().sanitize(), link.target_range.start.line))
         .collect::<Vec<_>>();
     assert_eq!(found, vec![(path.to_string(), expected_line)], "unexpected definitions at {}:{}", position.line + 1, position.character + 1);
+}
+
+/// Hovering those same references renders them rather than tripping over their missing name.
+#[test]
+fn test_xml_data_hover() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let views = views_path();
+    let content = std::fs::read_to_string(&views).unwrap();
+
+    for needle in [
+        r#"parent="module_xml_completion.completion_menu_other"#,
+        r#"t-call="module_xml_completion.completion_template_base"#,
+        r#"inherit_id="module_xml_completion.completion_template_base"#,
+    ] {
+        let position = position_after(&content, needle);
+        let params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: FileMgr::pathname2uri(&views) },
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+        let hover = Odoo::handle_hover(&mut session, params).expect("hover failed");
+        assert!(hover.is_some(), "expected a hover at {needle:?}");
+    }
 }
