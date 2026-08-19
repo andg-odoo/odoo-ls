@@ -14,13 +14,15 @@ pub struct XmlTemplateSymbol {
     /// (template_name, value_range) of the `t-inherit` this template extends, if any.
     /// A template element carries at most one `t-inherit`. The range excludes the quotes.
     pub t_inherit: Option<(OYarn, TextRange)>,
+    /// (xml_id, value_range) of the `inherit_id` this template extends, the backend spelling.
+    pub inherit_id: Option<(OYarn, TextRange)>,
 
     parent: SymbolKey,
 }
 
 impl XmlTemplateSymbol {
     pub fn new(xml_id: Option<OYarn>, t_name: Option<OYarn>, range: TextRange, parent: SymbolKey, is_web: bool, is_external: bool) -> Self {
-        Self { xml_id, t_name, range, t_calls: vec![], t_inherit: None, parent, is_web, is_external }
+        Self { xml_id, t_name, range, t_calls: vec![], t_inherit: None, inherit_id: None, parent, is_web, is_external }
     }
 
     pub fn parent(&self) -> SymbolKey {

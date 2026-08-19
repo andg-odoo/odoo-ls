@@ -82,8 +82,13 @@ fn test_xml_data_hover() {
     assert!(deleted.contains("(XML record) module_xml_completion.completion_partner"), "got: {deleted}");
     assert!(!deleted.contains("delete"), "a delete must not be a hover subject, got: {deleted}");
 
-    // A template with no t-name or t-inherit keeps the block down to what it has.
-    let base = hover_at(&mut session, &views, position_after(&content, r#"inherit_id="module_xml_completion.completion_template_base"#));
+    // The id a template declares is a subject of its own, and `inherit_id` names its parent
+    let backend = hover_at(&mut session, &views, position_after(&content, r#"<template id="completion_template_backend"#));
+    assert!(backend.contains("(XML template) module_xml_completion.completion_template_backend"), "got: {backend}");
+    assert!(backend.contains("inherits: module_xml_completion.completion_template_extra"), "got: {backend}");
+
+    // A template with no t-name and no parent keeps the block down to what it has.
+    let base = hover_at(&mut session, &views, position_after(&content, r#"<template id="completion_template_base"#));
     assert!(base.contains("(XML template) module_xml_completion.completion_template_base"), "got: {base}");
     assert!(!base.contains("t-name:") && !base.contains("inherits:"), "empty lines should be omitted, got: {base}");
 }

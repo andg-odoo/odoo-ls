@@ -984,7 +984,7 @@ impl FeaturesUtils {
                 if let Some(t_name) = template.t_name.as_ref() {
                     details.push(format!("t-name: {t_name}"));
                 }
-                if let Some((inherited, _)) = template.t_inherit.as_ref() {
+                if let Some((inherited, _)) = template.inherit_id.as_ref().or(template.t_inherit.as_ref()) {
                     details.push(format!("inherits: {inherited}"));
                 }
                 if template.is_web {

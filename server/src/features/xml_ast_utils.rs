@@ -348,6 +348,12 @@ impl XmlAstUtils {
 
     fn visit_template<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
         XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["inherit_id", "groups"], out, on_dep_only);
+        if let Some(id) = node.attribute_node("id")
+            && XmlAstUtils::is_at_offset(&id.range_value(), offset)
+            && let Some(file_module) = from_module
+        {
+            XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlIdDeclaration, id.value(), file_module, id.range_value(), out, on_dep_only);
+        }
         for child in node.children() {
             XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
         }

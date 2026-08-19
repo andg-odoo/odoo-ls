@@ -89,3 +89,32 @@ fn test_xml_semantic_tokens_template_names() {
     assert_token(&tokens, "module_templates_b.CallFrontend", TYPE, DECLARATION);
     assert_token(&tokens, "module_templates_a.FrontendTemplate", TYPE, NO_MODIFIER);
 }
+
+/// A `<template id=…>` declares an xml id like a `<record id=…>` does, and a `t-call` uses one.
+#[test]
+fn test_xml_semantic_tokens_templates() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = addon_path(&["module_xml_completion", "views", "completion_views.xml"]);
+
+    let tokens = tokens_of(&mut session, &path);
+
+    assert_token(&tokens, "completion_template_base", CLASS, DECLARATION);
+    assert_token(&tokens, "module_xml_completion.completion_template_base", CLASS, NO_MODIFIER);
+}
+
+/// A `t-call` on a template of a module that is not a dependency stays uncoloured.
+#[test]
+fn test_xml_semantic_tokens_out_of_deps_template() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = addon_path(&["module_templates_b", "data", "backend_templates.xml"]);
+
+    let tokens = tokens_of(&mut session, &path);
+
+    assert_token(&tokens, "caller_ols05074", CLASS, DECLARATION);
+    assert!(
+        !tokens.iter().any(|(text, _, _)| text.starts_with("module_templates_a")),
+        "module_templates_b does not depend on module_templates_a, got: {tokens:?}"
+    );
+}
