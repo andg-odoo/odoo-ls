@@ -2,7 +2,7 @@ use std::{io::Error, panic, sync::{Arc, Mutex, atomic::AtomicBool}, thread::Join
 
 use crossbeam_channel::{Receiver, Select, Sender};
 use lsp_server::{Connection, IoThreads, Message, ProtocolError, RequestId, ResponseError};
-use lsp_types::{CancelParams, CompletionOptions, DeclarationOptions, DefinitionOptions, DocumentSymbolOptions, FileOperationFilter, FileOperationPattern, FileOperationRegistrationOptions, HoverProviderCapability, InitializeParams, InitializeResult, OneOf, ReferencesOptions, SaveOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, WorkDoneProgressOptions, WorkspaceFileOperationsServerCapabilities, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities, WorkspaceSymbolOptions, notification::{Cancel, DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidChangeWorkspaceFolders, DidCloseTextDocument, DidCreateFiles, DidDeleteFiles, DidOpenTextDocument, DidRenameFiles, DidSaveTextDocument, Notification}, request::{Completion, DocumentSymbolRequest, GotoDeclaration, GotoDefinition, HoverRequest, References, Request, ResolveCompletionItem, Shutdown, WorkspaceSymbolRequest, WorkspaceSymbolResolve, SemanticTokensFullRequest}};
+use lsp_types::{CancelParams, CompletionOptions, DeclarationOptions, DefinitionOptions, DocumentSymbolOptions, FileOperationFilter, FileOperationPattern, FileOperationRegistrationOptions, HoverProviderCapability, InitializeParams, InitializeResult, OneOf, ReferencesOptions, SaveOptions, SignatureHelpOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, WorkDoneProgressOptions, WorkspaceFileOperationsServerCapabilities, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities, WorkspaceSymbolOptions, notification::{Cancel, DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidChangeWorkspaceFolders, DidCloseTextDocument, DidCreateFiles, DidDeleteFiles, DidOpenTextDocument, DidRenameFiles, DidSaveTextDocument, Notification}, request::{Completion, DocumentSymbolRequest, GotoDeclaration, GotoDefinition, HoverRequest, References, Request, ResolveCompletionItem, Shutdown, SignatureHelpRequest, WorkspaceSymbolRequest, WorkspaceSymbolResolve, SemanticTokensFullRequest}};
 use crate::features::semantic_tokens::SemanticTokensFeature;
 use ruff_source_file::PositionEncoding;
 use serde_json::json;
@@ -188,6 +188,13 @@ impl Server {
                     resolve_provider: Some(true),
                     trigger_characters: Some(vec![S!("."), S!(","), S!("'"), S!("\""), S!("(")]),
                     ..CompletionOptions::default()
+                }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec![S!("("), S!(",")]),
+                    retrigger_characters: Some(vec![S!(",")]),
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: Some(false)
+                    },
                 }),
                 references_provider: Some(OneOf::Right(ReferencesOptions {
                     work_done_progress_options: WorkDoneProgressOptions {
@@ -431,7 +438,7 @@ impl Server {
                 match r.method.as_str() {
                     HoverRequest::METHOD | GotoDefinition::METHOD | GotoDeclaration::METHOD | References::METHOD | DocumentSymbolRequest::METHOD |
                     WorkspaceSymbolRequest::METHOD | WorkspaceSymbolResolve::METHOD | Completion::METHOD | ResolveCompletionItem::METHOD |
-                    SemanticTokensFullRequest::METHOD => {
+                    SemanticTokensFullRequest::METHOD | SignatureHelpRequest::METHOD => {
                         self.interrupt_rebuild_boolean.store(true, std::sync::atomic::Ordering::SeqCst);
                         if DEBUG_THREADS {
                             info!("Sending request to main thread : {} - {}", r.method, r.id);

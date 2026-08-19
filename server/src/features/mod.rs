@@ -15,6 +15,7 @@ pub mod references_csv;
 pub mod references_xml;
 pub mod csv_ast_utils;
 pub mod semantic_tokens;
+pub mod signature_help;
 pub mod workspace_symbols;
 pub mod xml_ast_utils;
 pub mod owl_xml_utils;

@@ -2,9 +2,9 @@ use std::{collections::VecDeque, path::{Path, PathBuf}, sync::{Arc, Mutex}, time
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use lsp_server::{Message, RequestId, Response, ResponseError};
-use lsp_types::{CompletionItem, CompletionResponse, DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location, LogMessageParams, MessageType, SemanticTokensResult, ShowMessageParams, WorkspaceSymbol, WorkspaceSymbolResponse, notification::{DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidChangeWorkspaceFolders,
+use lsp_types::{CompletionItem, CompletionResponse, DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location, SignatureHelp, LogMessageParams, MessageType, SemanticTokensResult, ShowMessageParams, WorkspaceSymbol, WorkspaceSymbolResponse, notification::{DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidChangeWorkspaceFolders,
     DidCloseTextDocument, DidCreateFiles, DidDeleteFiles, DidOpenTextDocument, DidRenameFiles, DidSaveTextDocument, LogMessage,
-    Notification, ShowMessage}, request::{Completion, DocumentSymbolRequest, GotoDeclaration, GotoDeclarationResponse, GotoDefinition, HoverRequest, References, Request, ResolveCompletionItem, SemanticTokensFullRequest, Shutdown, WorkspaceSymbolRequest, WorkspaceSymbolResolve}};
+    Notification, ShowMessage}, request::{Completion, DocumentSymbolRequest, GotoDeclaration, GotoDeclarationResponse, GotoDefinition, HoverRequest, References, Request, ResolveCompletionItem, SemanticTokensFullRequest, Shutdown, SignatureHelpRequest, WorkspaceSymbolRequest, WorkspaceSymbolResolve}};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use tracing::{error, info, warn};
@@ -462,6 +462,11 @@ pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
                             // already handed us, and the client is blocked on the answer.
                             let mut session = create_session!(sender_to_s, receiver_to_s, Some(generic_sender_to_main.clone()), sync_odoo, delayed_process_sender);
                             to_value_not_null::<CompletionItem>(Odoo::handle_completion_resolve(&mut session, serde_json::from_value(r.params).unwrap()))
+                        },
+                        SignatureHelpRequest::METHOD => {
+                            let mut session = create_session!(sender_to_s, receiver_to_s, Some(generic_sender_to_main.clone()), sync_odoo, delayed_process_sender);
+                            SyncOdoo::process_rebuilds(&mut session, true);
+                            to_value::<SignatureHelp>(Odoo::handle_signature_help(&mut session, serde_json::from_value(r.params).unwrap()))
                         },
                         SemanticTokensFullRequest::METHOD => {
                             let mut session = create_session!(sender_to_s, receiver_to_s, Some(generic_sender_to_main.clone()), sync_odoo, delayed_process_sender);
