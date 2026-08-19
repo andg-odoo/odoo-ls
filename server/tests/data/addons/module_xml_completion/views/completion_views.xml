@@ -12,6 +12,8 @@
                 </field>
                 <field name="group_id" ref="base.group_us"/>
                 <field name="partner_id" ref="base.group_us"/>
+                <field name="partner_id" ref="module_xml_c"/>
+                <field name="owner_id" ref="module_xml_completion.completion_par"/>
                 <button name="action_completion_co" type="object"/>
                 <button name="_completion_p" type="object"/>
                 <button name="__completion_d" type="object"/>
@@ -29,6 +31,22 @@
         </field>
         <field name="name">module_xml_completion.parent.list</field>
         <field name="model">module_xml_completion.parent</field>
+    </record>
+
+    <record id="completion_partner" model="res.partner">
+        <field name="name">Completion Partner</field>
+    </record>
+
+    <delete model="res.partner" id="completion_partner"/>
+
+    <asset id="completion_asset" name="Completion Asset">
+        <field name="bundle">web.assets_backend</field>
+        <field name="path">module_xml_completion/static/src/completion.js</field>
+    </asset>
+
+    <record id="completion_hover_probe" model="module_xml_completion.parent">
+        <field name="group_id" ref="module_xml_completion.completion_partner"/>
+        <field name="owner_id" ref="module_xml_completion.completion_asset"/>
     </record>
 
     <record id="completion_action_parent" model="ir.actions.act_window">
@@ -55,7 +73,8 @@
         <div>Base</div>
     </template>
 
-    <template id="completion_template_child" inherit_id="module_xml_completion.completion_template_base">
+    <template id="completion_template_child" inherit_id="module_xml_completion.completion_template_base"
+        t-name="completion_child" t-inherit="module_xml_completion.completion_template_base">
         <div>Child</div>
     </template>
 
@@ -66,5 +85,6 @@
     <template id="completion_template_caller">
         <t t-call="module_xml_completion.completion_template_base"/>
         <t t-call="module_xml_completion.completion_template_ex"/>
+        <t t-call="module_xml_completion.completion_template_child"/>
     </template>
 </odoo>

@@ -10,6 +10,7 @@ class CompletionParent(models.Model):
     line_ids = fields.One2many("module_xml_completion.line", "parent_id")
     group_id = fields.Many2one("res.groups")
     partner_id = fields.Many2one("res.partner")
+    owner_id = fields.Many2one("res.partner")
     default_amount = fields.Float(default=lambda self: 0.0)
 
     def action_completion_confirm(self):
