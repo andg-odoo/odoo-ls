@@ -303,6 +303,8 @@ fn model_items(session: &mut SessionInfo, from_module: Option<ModuleKey>, typed:
             continue;
         }
         let mut label_details = None;
+        // `_` sorts before every model name, putting the ones usable as they are first
+        let mut sort_text = format!("_{name}");
         if let Some(current_module) = from_module
             && !model.borrow().model_in_deps(session, current_module)
         {
@@ -310,11 +312,13 @@ fn model_items(session: &mut SessionInfo, from_module: Option<ModuleKey>, typed:
                 continue;
             }
             label_details = require_details(session, model.borrow().get_main_symbols(session, None).collect());
+            sort_text = name.to_string();
         }
         items.push(CompletionItem {
             label: name.to_string(),
             kind: Some(CompletionItemKind::CLASS),
             label_details,
+            sort_text: Some(sort_text),
             ..Default::default()
         });
     }
