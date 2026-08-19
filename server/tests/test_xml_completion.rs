@@ -252,3 +252,16 @@ fn test_xml_completion_in_field_text() {
     let typed = labels(&mut session, &path, broken, "<field name=\"model\">res.");
     assert!(typed.contains(&"res.partner".to_string()), "expected a model name in an unparsable document, got: {typed:?}");
 }
+
+/// A `ref=` reaches the comodel records named by a dotted prefix or by the start of a module name.
+#[test]
+fn test_xml_completion_ref_to_own_module() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    let expected = vec!["module_xml_completion.completion_partner".to_string()];
+    assert_eq!(labels(&mut session, &path, &content, r#"name="partner_id" ref="module_xml_c"#), expected);
+    assert_eq!(labels(&mut session, &path, &content, r#"name="owner_id" ref="module_xml_completion.completion_par"#), expected);
+}

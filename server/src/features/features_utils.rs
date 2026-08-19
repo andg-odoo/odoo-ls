@@ -8,7 +8,7 @@ use crate::core::file_mgr::FileMgr;
 use crate::core::odoo::SyncOdoo;
 use crate::core::symbols::function_symbol::Argument;
 use crate::core::symbols::storage::xml::xml_field_symbol::XmlFieldName;
-use crate::core::symbols::symbol_keys::{ModelSymbolKey, ModuleKey, SourceFileKey, SymbolKey, Wk, XmlId, XmlRecordKey};
+use crate::core::symbols::symbol_keys::{ModelSymbolKey, ModuleKey, SourceFileKey, SymbolKey, Wk, XmlId};
 use crate::core::symbols::storage::SymbolTable;
 use crate::core::symbols::FunctionSymbol;
 use crate::tree::OYarnExt;
@@ -596,7 +596,7 @@ impl FeaturesUtils {
                                 }
                             },
                                 ModelSymbolKey::XmlRecord(xml_key) => {
-                                if let Some(xml_block) = FeaturesUtils::format_xml_record_block(session, xml_key) {
+                                if let Some(xml_block) = FeaturesUtils::format_xml_data_block(session, xml_key.into()) {
                                     blocks.push(xml_block);
                                 }
                             }
@@ -611,7 +611,7 @@ impl FeaturesUtils {
                     let xml_ids = SyncOdoo::get_xml_ids(session, file_sym, str, &std::ops::Range { start: 0, end: 0 }, &mut vec![]);
                     for xml_id in xml_ids.iter_valid(session.st()) {
                         if let XmlId::XmlRecord(record_key) = xml_id
-                            && let Some(xml_block) = FeaturesUtils::format_xml_record_block(session, record_key) {
+                            && let Some(xml_block) = FeaturesUtils::format_xml_data_block(session, record_key.into()) {
                                 blocks.push(xml_block);
                                 string_handled = true;
                             }
@@ -632,10 +632,8 @@ impl FeaturesUtils {
                 }
                 continue;
             };
-            if let SymbolKey::XmlRecord(xml_key) = symbol {
-                if let Some(block) = Self::format_xml_record_block(session, xml_key) {
-                    blocks.push(block);
-                }
+            if let Some(block) = Self::format_xml_data_block(session, symbol) {
+                blocks.push(block);
                 continue;
             }
             let context = &eval_symbol.get_weak().context;
@@ -962,24 +960,88 @@ impl FeaturesUtils {
         }
     }
 
-    fn format_xml_record_block(session: &SessionInfo, xml_record_key: XmlRecordKey) -> Option<String> {
+    /// The hover block of an xml data symbol, `None` for anything else and for one with no id.
+    fn format_xml_data_block(session: &SessionInfo, symbol: SymbolKey) -> Option<String> {
         let st = &session.sync_odoo.symbol_table;
-        let record = &st[xml_record_key];
-        let local_id = record.xml_id.as_ref()?;
-        let module_name = st.find_module(xml_record_key)
-            .map(|mk| st[mk].name.clone())
-            .unwrap_or_default();
-        let full_xml_id = if module_name.is_empty() {
-            local_id.to_string()
-        } else {
-            format!("{}.{}", module_name, local_id)
-        };
-        let file_name = st.get_file(xml_record_key.into())
+        match symbol {
+            SymbolKey::XmlRecord(key) => {
+                let record = &st[key];
+                let title = Self::full_xml_id(st, symbol, record.xml_id.as_ref()?);
+                Some(Self::format_xml_block(st, symbol, "record", &title, &[format!("model: {}", record.model.0)]))
+            },
+            SymbolKey::XmlDelete(key) => {
+                let delete = &st[key];
+                let title = Self::full_xml_id(st, symbol, delete.xml_id.as_ref()?);
+                Some(Self::format_xml_block(st, symbol, "delete", &title, &[format!("model: {}", delete.model)]))
+            },
+            // A menu item carries nothing else, its name and action are attributes we do not read
+            SymbolKey::XmlMenuItem(key) => {
+                let title = Self::full_xml_id(st, symbol, st[key].xml_id.as_ref()?);
+                Some(Self::format_xml_block(st, symbol, "menuitem", &title, &[]))
+            },
+            SymbolKey::XmlTemplate(key) => {
+                let template = &st[key];
+                let title = match template.xml_id.as_ref() {
+                    Some(local_id) => Self::full_xml_id(st, symbol, local_id),
+                    None => template.t_name.as_ref()?.to_string(),
+                };
+                let mut details = vec![];
+                if let Some(t_name) = template.t_name.as_ref() {
+                    details.push(format!("t-name: {t_name}"));
+                }
+                if let Some((inherited, _)) = template.t_inherit.as_ref() {
+                    details.push(format!("inherits: {inherited}"));
+                }
+                if template.is_web {
+                    details.push(S!("frontend: true"));
+                }
+                Some(Self::format_xml_block(st, symbol, "template", &title, &details))
+            },
+            SymbolKey::XmlAsset(key) => {
+                let title = Self::full_xml_id(st, symbol, st[key].xml_id.as_ref()?);
+                // `<bundle>` and `<path>` children are validated but not stored, only fields are
+                let fields = st[key].children();
+                let details = ["bundle", "path", "directive"].iter().filter_map(|&name| {
+                    let text = fields.iter().find_map(|&child| match child {
+                        SymbolKey::XmlField(field) if st[field].field_name.as_str() == name => st[field].text.as_ref(),
+                        _ => None,
+                    })?;
+                    Some(format!("{name}: {}", text.trim()))
+                }).collect::<Vec<_>>();
+                Some(Self::format_xml_block(st, symbol, "asset", &title, &details))
+            },
+            // A field is named rather than identified, so the title carries its name
+            SymbolKey::XmlField(key) => {
+                let field = &st[key];
+                let details = field.text.iter().map(|text| format!("value: {}", text.trim())).collect::<Vec<_>>();
+                Some(Self::format_xml_block(st, symbol, "field", &field.field_name, &details))
+            },
+            _ => None,
+        }
+    }
+
+    /// `module.local_id` of an xml data symbol, or the bare local id outside of any module.
+    fn full_xml_id(st: &SymbolTable, symbol: SymbolKey, local_id: &OYarn) -> String {
+        match st.find_module(symbol) {
+            Some(module) => format!("{}.{}", st[module].name, local_id),
+            None => local_id.to_string(),
+        }
+    }
+
+    /// The fenced hover block of an xml data symbol: what it is, its details, then its file.
+    fn format_xml_block(st: &SymbolTable, symbol: SymbolKey, kind: &str, title: &str, details: &[String]) -> String {
+        let file_name = st.get_file(symbol)
             .map(|f| {
                 let path = st.file_path(f);
                 Path::new(path).file_name().unwrap_or_default().to_str().unwrap_or_default().to_string()
             })
             .unwrap_or_default();
-        Some(format!("```\n(XML record) {}\nmodel: {}\nfile: {}\n```", full_xml_id, record.model.0, file_name))
+        let mut block = format!("```\n(XML {kind}) {title}\n");
+        for detail in details {
+            block.push_str(detail);
+            block.push('\n');
+        }
+        block.push_str(&format!("file: {file_name}\n```"));
+        block
     }
 }
