@@ -14,7 +14,7 @@ use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
 use lsp_types::{Diagnostic, Location, Position, Range};
 use ruff_python_ast::{
-    Expr, ExprCall, FStringPart, Identifier, Number, Parameter, UnaryOp,
+    Expr, ExprCall, FStringPart, Identifier, Number, Operator, Parameter, UnaryOp,
 };
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use std::cmp::{max, min};
@@ -1253,12 +1253,68 @@ impl Evaluation {
                     }
                 }
             },
-            ExprOrIdent::Expr(Expr::BinOp(operator)) => {
-                if is_in_validation || odoo.evaluation_search.is_some() {
-                    let (_, diags) = Evaluation::eval_from_ast(session, &operator.left, parent, max_infer, false, required_dependencies);
-                    diagnostics.extend(diags);
+            ExprOrIdent::Expr(Expr::BinOp(operator)) => 'bin_op_block: {
+                let visit_operands = is_in_validation || odoo.evaluation_search.is_some();
+                if for_annotation {
+                    // in an annotation, `X | Y` is a union and not a call to `__or__`
+                    if visit_operands {
+                        let (_, diags) = Evaluation::eval_from_ast(session, &operator.left, parent, max_infer, false, required_dependencies);
+                        diagnostics.extend(diags);
+                        let (_, diags) = Evaluation::eval_from_ast(session, &operator.right, parent, max_infer, false, required_dependencies);
+                        diagnostics.extend(diags);
+                    }
+                    break 'bin_op_block
+                }
+                let method = match operator.op {
+                    Operator::Add => "__add__",
+                    Operator::Sub => "__sub__",
+                    Operator::Mult => "__mul__",
+                    Operator::MatMult => "__matmul__",
+                    Operator::Div => "__truediv__",
+                    Operator::FloorDiv => "__floordiv__",
+                    Operator::Mod => "__mod__",
+                    Operator::Pow => "__pow__",
+                    Operator::LShift => "__lshift__",
+                    Operator::RShift => "__rshift__",
+                    Operator::BitOr => "__or__",
+                    Operator::BitXor => "__xor__",
+                    Operator::BitAnd => "__and__",
+                };
+                let (bases, diags) = Evaluation::eval_from_ast(session, &operator.left, parent, max_infer, false, required_dependencies);
+                diagnostics.extend(diags);
+                if visit_operands {
                     let (_, diags) = Evaluation::eval_from_ast(session, &operator.right, parent, max_infer, false, required_dependencies);
                     diagnostics.extend(diags);
+                }
+                for base in bases.into_iter() {
+                    let base_sym_weak_eval = base.symbol.get_symbol_weak_transformed(session, Some(context), &mut diagnostics, None);
+                    let base_eval_ptrs = SymbolTable::follow_ref(&base_sym_weak_eval, session, Some(context), true, false, None, None);
+                    for base_eval_ptr in base_eval_ptrs.iter() {
+                        let (EvaluationSymbolPtr::WEAK(base_sym_weak_eval) | EvaluationSymbolPtr::SELF(base_sym_weak_eval)) = base_eval_ptr else {continue};
+                        let Some(base_sym) = base_sym_weak_eval.weak.upgrade(session.st()) else {continue};
+                        let (operator_functions, diags) = SymbolTable::get_member_symbol(session, base_sym, method, module, true, false, true, false, false);
+                        diagnostics.extend(diags);
+                        // as for a call, the operator can return `Self`, resolved from the context
+                        context.insert(ContextKey::BaseCall, ContextValue::SYMBOL(base_sym.into()));
+                        context.insert(ContextKey::BaseIsSelf, ContextValue::BOOLEAN(matches!(base_eval_ptr, EvaluationSymbolPtr::SELF(_))));
+                        for operator_function in operator_functions.into_iter() {
+                            let SymbolKey::Function(operator_function) = operator_function else {continue};
+                            SyncOdoo::ensure_func_evaluations(session, operator_function);
+                            for eval in session.st()[operator_function].evaluations.clone() {
+                                let eval_ptr = eval.symbol.get_symbol_weak_transformed(session, Some(context), &mut diagnostics, Some(session.st().get_file(parent).unwrap().into()));
+                                evals.push(Evaluation {
+                                    symbol: EvaluationSymbol {
+                                        sym: eval_ptr,
+                                        get_symbol_hook: None,
+                                    },
+                                    value: None,
+                                    range: Some(operator.range())
+                                });
+                            }
+                        }
+                        context.remove(ContextKey::BaseIsSelf);
+                        context.remove(ContextKey::BaseCall);
+                    }
                 }
             },
             ExprOrIdent::Expr(Expr::If(if_expr)) => {
