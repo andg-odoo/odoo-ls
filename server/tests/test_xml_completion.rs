@@ -8,20 +8,12 @@ use odoo_ls_server::utils::PathSanitizer;
 mod setup;
 mod test_utils;
 
+use test_utils::position_after;
+
 fn views_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests").join("data").join("addons")
         .join("module_xml_completion").join("views").join("completion_views.xml")
-}
-
-/// Cursor position right after the single occurrence of `needle`, where completion is asked for.
-fn position_after(content: &str, needle: &str) -> Position {
-    let start = content.find(needle).unwrap_or_else(|| panic!("{needle:?} not found in the fixture"));
-    assert!(content[start + 1..].find(needle).is_none(), "{needle:?} is not unique in the fixture");
-    let offset = start + needle.len();
-    let line = content[..offset].matches('\n').count();
-    let character = offset - content[..offset].rfind('\n').map(|index| index + 1).unwrap_or(0);
-    Position::new(line as u32, character as u32)
 }
 
 fn complete(session: &mut SessionInfo, path: &str, position: Position) -> (Vec<CompletionItem>, bool) {
