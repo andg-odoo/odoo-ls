@@ -55,6 +55,7 @@
     </record>
 
     <record id="completion_model_probe" model="module_xml_completion.pa"/>
+    <record id="completion_rank_probe" model="module_"/>
 
     <record id="completion_text_probe" model="ir.ui.view">
         <field name="model">

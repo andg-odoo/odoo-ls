@@ -265,3 +265,23 @@ fn test_xml_completion_ref_to_own_module() {
     assert_eq!(labels(&mut session, &path, &content, r#"name="partner_id" ref="module_xml_c"#), expected);
     assert_eq!(labels(&mut session, &path, &content, r#"name="owner_id" ref="module_xml_completion.completion_par"#), expected);
 }
+
+/// A model usable as it is outranks one needing a new dependency, whatever their names.
+#[test]
+fn test_xml_completion_model_ranking() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    let (items, _) = complete(&mut session, &path, position_after(&content, r#"completion_rank_probe" model="module_"#));
+    let item = |label: &str| items.iter().find(|item| item.label == label)
+        .unwrap_or_else(|| panic!("{label} not offered, got: {items:?}"));
+    let in_deps = item("module_xml_completion.parent");
+    let out_of_deps = item("module_1.binop_test_model");
+
+    assert!(out_of_deps.label < in_deps.label, "the fixture must have the out of deps label come first");
+    assert!(in_deps.sort_text < out_of_deps.sort_text, "got {:?} and {:?}", in_deps.sort_text, out_of_deps.sort_text);
+    let note = out_of_deps.label_details.as_ref().and_then(|details| details.description.clone());
+    assert_eq!(note, Some("require module_1".to_string()));
+}
