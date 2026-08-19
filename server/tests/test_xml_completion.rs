@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 
-use lsp_types::{CompletionItem, CompletionParams, CompletionTextEdit, CompletionResponse, PartialResultParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
+use lsp_types::{CompletionItem, CompletionParams, CompletionTextEdit, CompletionResponse, PartialResultParams, Position, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
 use odoo_ls_server::core::{file_mgr::FileMgr, odoo::Odoo};
 use odoo_ls_server::threads::SessionInfo;
 use odoo_ls_server::utils::PathSanitizer;
@@ -142,4 +143,53 @@ fn test_xml_completion_menus_and_templates() {
 
     let templates = labels(&mut session, &path, &content, r#"t-call="module_xml_completion.completion_template_ex"#);
     assert_eq!(templates, vec!["module_xml_completion.completion_template_extra".to_string()]);
+}
+
+/// Replace the text of `path` in memory, as typing would, leaving the file on disk untouched.
+fn set_content(session: &mut SessionInfo, path: &str, text: &str) {
+    static VERSION: AtomicI32 = AtomicI32::new(2);
+    let event = [TextDocumentContentChangeEvent { range: None, range_length: None, text: text.to_string() }];
+    let version = VERSION.fetch_add(1, Ordering::Relaxed);
+    let file_mgr = session.sync_odoo.get_file_mgr();
+    file_mgr.borrow_mut().update_file_info(session, path, Some(event.as_slice()), Some(version), false);
+}
+
+/// Completion is asked for while the tag is still being typed, so the document rarely parses.
+#[test]
+fn test_xml_completion_in_unparsable_document() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+
+    // A start tag with no `>`, deep in an arch, after a comment and a value that hold markup
+    let deep = concat!(
+        "<odoo>\n",
+        "    <record id=\"completion_view_form\" model=\"ir.ui.view\">\n",
+        "        <field name=\"model\">module_xml_completion.parent</field>\n",
+        "        <field name=\"arch\" type=\"xml\">\n",
+        "            <form string=\"Parent\">\n",
+        "                <!-- <field name=\"amount\"> a comment holding markup -->\n",
+        "                <group invisible=\"context.get('x') != 'y' and 1 &gt; 0\">\n",
+        "                    <field name=\"line_ids\">\n",
+        "                        <list>\n",
+        "                            <field name=\"line_am",
+    );
+    set_content(&mut session, &path, deep);
+    let subview = labels(&mut session, &path, deep, "<field name=\"line_am");
+    assert_eq!(subview, vec!["line_amount".to_string()], "expected a field of the comodel of the unclosed subview");
+
+    // An attribute value with no closing quote, at the top level of the record.
+    let unterminated = "<odoo>\n    <record id=\"probe\" model=\"module_xml_completion.pa";
+    set_content(&mut session, &path, unterminated);
+    let models = labels(&mut session, &path, unterminated, "model=\"module_xml_completion.pa");
+    assert!(models.contains(&"module_xml_completion.parent".to_string()), "expected a model name, got: {models:?}");
+
+    // The same field, once in a document that parses and once in one that does not.
+    let closed = "<odoo>\n    <record id=\"probe\" model=\"module_xml_completion.parent\">\n        <field name=\"amo\"/>\n    </record>\n</odoo>";
+    set_content(&mut session, &path, closed);
+    let well_formed = labels(&mut session, &path, closed, "<field name=\"amo");
+    let broken = "<odoo>\n    <record id=\"probe\" model=\"module_xml_completion.parent\">\n        <field name=\"amo";
+    set_content(&mut session, &path, broken);
+    assert_eq!(labels(&mut session, &path, broken, "<field name=\"amo"), well_formed);
+    assert_eq!(well_formed, vec!["amount".to_string()]);
 }

@@ -21,6 +21,9 @@ use std::rc::Rc;
 /// Items an XML completion answers with at most, past which the response is flagged incomplete.
 const MAX_ITEMS: usize = 200;
 
+/// Delimiters of the sections the tag scanner steps over, longest opening first.
+const TEXT_SECTIONS: [(&str, &str); 4] = [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>"), ("<!", ">")];
+
 /// What the attribute value under the cursor expects.
 enum XmlTarget {
     /// A model name: `<record model=…>`.
@@ -42,11 +45,19 @@ impl XmlCompletionFeature {
     pub fn autocomplete_xml(session: &mut SessionInfo, file_symbol: SourceFileKey, file_info: &Rc<RefCell<FileInfo>>, line: u32, character: u32) -> Option<CompletionResponse> {
         let offset = file_info.borrow().position_to_offset(line, character, session.sync_odoo.encoding);
         let data = file_info.borrow().file_info_ast.borrow().text_document.as_ref()?.contents().to_string();
+        // The tag being typed rarely parses, so a failure is repaired rather than given up on
+        let repaired;
         let document = match Document::parse(&data) {
             Ok(document) => document,
             Err(_) => {
-                warn!("Failed to parse XML document for completion at line {}, character {} in file {}", line, character, file_info.borrow().uri);
-                return None;
+                repaired = repaired_prefix(&data, offset)?;
+                match Document::parse(&repaired) {
+                    Ok(document) => document,
+                    Err(_) => {
+                        warn!("Failed to parse XML document for completion at line {}, character {} in file {}", line, character, file_info.borrow().uri);
+                        return None;
+                    }
+                }
             }
         };
         let (node, attr) = attribute_at(&document, offset)?;
@@ -61,6 +72,78 @@ impl XmlCompletionFeature {
         }
         Some(CompletionResponse::List(CompletionList { is_incomplete, items }))
     }
+}
+
+/// A parsable copy of `text[..offset]`, closing what is half typed without moving any byte.
+fn repaired_prefix(text: &str, offset: usize) -> Option<String> {
+    let prefix = text.get(..offset)?;
+    let mut open_tags: Vec<&str> = vec![];
+    let mut index = 0;
+    while let Some(found) = prefix[index..].find('<') {
+        let start = index + found;
+        let rest = &prefix[start..];
+        // A comment, a CDATA section or a processing instruction holds text, never markup
+        if let Some((open, close)) = TEXT_SECTIONS.iter().find(|(open, _)| rest.starts_with(open)) {
+            let Some(end) = rest[open.len()..].find(close) else {
+                return Some(close_tags(prefix[..start].to_string(), &open_tags));
+            };
+            index = start + open.len() + end + close.len();
+            continue;
+        }
+        let is_end = rest.starts_with("</");
+        let name_start = 1 + usize::from(is_end);
+        let name_len = rest[name_start..].find(['>', '/', ' ', '\t', '\r', '\n']).unwrap_or(rest.len() - name_start);
+        let name = &rest[name_start..name_start + name_len];
+        let attributes_start = name_start + name_len;
+        let mut quote: Option<char> = None;
+        let mut tag_end = None;
+        for (position, character) in rest[attributes_start..].char_indices() {
+            match (quote, character) {
+                (Some(open), _) if character == open => quote = None,
+                (Some(_), _) => {},
+                (None, '"' | '\'') => quote = Some(character),
+                (None, '>') => {
+                    tag_end = Some(attributes_start + position + 1);
+                    break;
+                },
+                (None, _) => {},
+            }
+        }
+        let Some(tag_end) = tag_end else {
+            let mut repaired = prefix[..start].to_string();
+            // Only a start tag is filled in, an unfinished end tag is left to the stack to close
+            if !is_end && !name.is_empty() {
+                repaired.push_str(rest);
+                if let Some(quote) = quote {
+                    repaired.push(quote);
+                } else if rest.trim_end().ends_with('=') {
+                    // An attribute whose value the cursor has not opened yet does not parse alone
+                    repaired.push_str("\"\"");
+                }
+                repaired.push_str("/>");
+            }
+            return Some(close_tags(repaired, &open_tags));
+        };
+        if is_end {
+            if open_tags.last() == Some(&name) {
+                open_tags.pop();
+            }
+        } else if !rest[..tag_end].ends_with("/>") {
+            open_tags.push(name);
+        }
+        index = start + tag_end;
+    }
+    Some(close_tags(prefix.to_string(), &open_tags))
+}
+
+/// `base` followed by an end tag for each element left open in it, innermost first.
+fn close_tags(mut base: String, open_tags: &[&str]) -> String {
+    for name in open_tags.iter().rev() {
+        base.push_str("</");
+        base.push_str(name);
+        base.push('>');
+    }
+    base
 }
 
 /// Element and attribute whose value the cursor sits in, an empty value being an empty range.
@@ -283,5 +366,62 @@ fn field_details(session: &mut SessionInfo, symbol: SymbolKey) -> Option<String>
             }
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repaired(text: &str) -> String {
+        repaired_prefix(text, text.len()).unwrap()
+    }
+
+    #[test]
+    fn repaired_prefix_closes_the_tag_being_typed() {
+        assert_eq!(
+            repaired(r#"<odoo><record model="ir.ui.view"><field name="i"#),
+            r#"<odoo><record model="ir.ui.view"><field name="i"/></record></odoo>"#
+        );
+        assert_eq!(
+            repaired("<odoo><form><sheet><group><field name="),
+            r#"<odoo><form><sheet><group><field name=""/></group></sheet></form></odoo>"#
+        );
+    }
+
+    /// A `>` or a quote inside an attribute value never ends the tag it belongs to.
+    #[test]
+    fn repaired_prefix_reads_quoted_attribute_values() {
+        assert_eq!(
+            repaired(r#"<odoo><field invisible="a > 1" readonly="b != 'c'"/><field name="#),
+            r#"<odoo><field invisible="a > 1" readonly="b != 'c'"/><field name=""/></odoo>"#
+        );
+    }
+
+    /// Markup quoted in a comment, a CDATA section or a processing instruction is only text.
+    #[test]
+    fn repaired_prefix_steps_over_text_sections() {
+        assert_eq!(
+            repaired(r#"<odoo><!-- <record model="x"> --><field name="a"#),
+            r#"<odoo><!-- <record model="x"> --><field name="a"/></odoo>"#
+        );
+        assert_eq!(
+            repaired(r#"<?xml version="1.0"?><odoo><![CDATA[<form>]]><field name="a"#),
+            r#"<?xml version="1.0"?><odoo><![CDATA[<form>]]><field name="a"/></odoo>"#
+        );
+    }
+
+    /// An unfinished end tag is dropped, the stack closes the element it was going to close.
+    #[test]
+    fn repaired_prefix_drops_an_unfinished_end_tag() {
+        assert_eq!(repaired("<odoo><form></fo"), "<odoo><form></form></odoo>");
+    }
+
+    /// Only the text up to the cursor is kept, whatever follows it.
+    #[test]
+    fn repaired_prefix_cuts_at_the_cursor() {
+        let text = r#"<odoo><field name="amount"/></odoo>"#;
+        let offset = text.find("amount").unwrap() + 2;
+        assert_eq!(repaired_prefix(text, offset).unwrap(), r#"<odoo><field name="am"/></odoo>"#);
     }
 }
