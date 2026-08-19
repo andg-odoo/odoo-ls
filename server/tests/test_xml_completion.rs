@@ -111,3 +111,25 @@ fn test_xml_completion_cap() {
     assert!(is_incomplete, "a capped response must be flagged incomplete");
     assert!(items.len() <= 200, "expected at most 200 items, got {}", items.len());
 }
+
+/// Attributes taking an xml id complete from the ids the position accepts.
+#[test]
+fn test_xml_completion_xml_ids() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    // `ref=` is filtered to the comodel of the field carrying it.
+    let groups = labels(&mut session, &path, &content, r#"name="group_id" ref="base.group_us"#);
+    assert!(groups.contains(&"base.group_user".to_string()), "expected a res.groups record, got: {groups:?}");
+    let partners = labels(&mut session, &path, &content, r#"name="partner_id" ref="base.group_us"#);
+    assert!(partners.is_empty(), "a res.partner ref should not offer res.groups records, got: {partners:?}");
+
+    // `groups=` completes the segment under the cursor, past the `!` that negates it.
+    let position = position_after(&content, r#"groups="base.group_user,!base.group_us"#);
+    let (items, _) = complete(&mut session, &path, position);
+    assert!(items.iter().any(|item| item.label == "base.group_user"), "expected a res.groups record, got: {items:?}");
+    let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.clone() else { panic!("expected a text edit") };
+    assert_eq!(edit.range.end.character - edit.range.start.character, "base.group_us".len() as u32);
+}
