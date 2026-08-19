@@ -311,15 +311,21 @@ fn member_items(session: &mut SessionInfo, from_module: Option<ModuleKey>, model
             }
         }
     }
-    members.retain(|(name, symbols)| name.starts_with(typed) && !symbols.is_empty());
-    members.sort_by(|left, right| left.0.cmp(&right.0));
+    members.retain(|(name, symbols)| {
+        // A name in angle brackets is synthetic, `<lambda>` and the like, and cannot be typed
+        name.starts_with(typed) && !symbols.is_empty() && !(name.starts_with('<') && name.ends_with('>'))
+    });
+    // Sorted on the rank rather than the name so that the cap keeps the public members
+    members.sort_by_cached_key(|(name, _)| member_sort_text(name));
     members.dedup_by(|left, right| left.0 == right.0);
     let is_incomplete = members.len() > MAX_ITEMS;
     members.truncate(MAX_ITEMS);
     let items = members.into_iter().map(|(name, symbols)| CompletionItem {
+        sort_text: Some(member_sort_text(&name)),
         label: name.to_string(),
         kind: Some(match only_methods {
-            true => CompletionItemKind::METHOD,
+            // A callable kind makes the client insert parentheses, which no attribute value takes
+            true => CompletionItemKind::VALUE,
             false => CompletionItemKind::FIELD,
         }),
         label_details: match only_methods {
@@ -332,6 +338,18 @@ fn member_items(session: &mut SessionInfo, from_module: Option<ModuleKey>, model
         ..Default::default()
     }).collect();
     (items, is_incomplete)
+}
+
+/// Rank of a member, `_private` after the public ones and `__dunder__` after those.
+fn member_sort_text(name: &str) -> String {
+    let mut text = name.to_string();
+    if name.starts_with('_') {
+        text.insert(0, '~');
+    }
+    if name.starts_with("__") {
+        text.insert(0, '~');
+    }
+    text
 }
 
 /// Type of a field as `Many2one(res.partner)` or `Char`, for the note beside its label.
