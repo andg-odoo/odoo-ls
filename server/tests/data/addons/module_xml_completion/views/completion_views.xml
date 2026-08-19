@@ -38,6 +38,14 @@
 
     <record id="completion_model_probe" model="module_xml_completion.pa"/>
 
+    <record id="completion_text_probe" model="ir.ui.view">
+        <field name="model">
+            module_xml_completion.par
+        </field>
+    </record>
+
+    <record id="completion_empty_text_probe" model="ir.ui.view"><field name="model"></field></record>
+
     <menuitem id="completion_menu_root" name="Completion"/>
     <menuitem id="completion_menu_other" name="Other"/>
     <menuitem id="completion_menu_child" name="Child" parent="module_xml_completion.completion_menu_ro" action="module_xml_completion.completion_action_par"/>
