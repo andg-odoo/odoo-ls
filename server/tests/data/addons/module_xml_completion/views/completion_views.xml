@@ -36,13 +36,20 @@
     <record id="completion_model_probe" model="module_xml_completion.pa"/>
 
     <menuitem id="completion_menu_root" name="Completion"/>
+    <menuitem id="completion_menu_other" name="Other"/>
     <menuitem id="completion_menu_child" name="Child" parent="module_xml_completion.completion_menu_ro" action="module_xml_completion.completion_action_par"/>
+    <menuitem id="completion_menu_leaf" name="Leaf" parent="module_xml_completion.completion_menu_other"/>
 
     <template id="completion_template_base">
         <div>Base</div>
     </template>
 
+    <template id="completion_template_extra">
+        <div>Extra</div>
+    </template>
+
     <template id="completion_template_caller">
-        <t t-call="module_xml_completion.completion_template_ba"/>
+        <t t-call="module_xml_completion.completion_template_base"/>
+        <t t-call="module_xml_completion.completion_template_ex"/>
     </template>
 </odoo>

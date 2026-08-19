@@ -108,6 +108,8 @@ impl XmlAstUtils {
         }
         if node.is_element() {
             XmlAstUtils::scan_format_xml_id_refs(session, node, offset, from_module, out, on_dep_only);
+            // `t-call` names a qweb view by xml id, a frontend template name resolving to nothing.
+            XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["t-call"], out, on_dep_only);
             match node.tag_name().name()  {
                 "record" => {
                     XmlAstUtils::visit_record(session, node, offset, from_module, scope, out, on_dep_only);
@@ -338,7 +340,7 @@ impl XmlAstUtils {
     }
 
     fn visit_menu_item<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
-        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["action", "groups"], out, on_dep_only);
+        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["action", "parent", "groups"], out, on_dep_only);
         for child in node.children() {
             XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
         }
@@ -452,10 +454,14 @@ impl XmlAstUtils {
                     ) {
                         continue;
                     }
-            if let XmlId::XmlRecord(record_key) = xml_id {
-                symbols.push(record_key.into());
-            } else if let XmlId::PythonClass(record_key) = xml_id {
-                symbols.push(record_key.into());
+            match xml_id {
+                XmlId::PythonClass(key) => symbols.push(key.into()),
+                XmlId::XmlRecord(key) => symbols.push(key.into()),
+                XmlId::XmlMenuItem(key) => symbols.push(key.into()),
+                XmlId::XmlTemplate(key) => symbols.push(key.into()),
+                XmlId::XmlAsset(key) => symbols.push(key.into()),
+                // `<delete id=…>` names the records to remove, it declares nothing.
+                XmlId::XmlDelete(_) => {},
             }
         }
         out(XmlRef { kind, range, symbols });
