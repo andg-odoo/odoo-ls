@@ -55,6 +55,10 @@
         <div>Base</div>
     </template>
 
+    <template id="completion_template_child" inherit_id="module_xml_completion.completion_template_base">
+        <div>Child</div>
+    </template>
+
     <template id="completion_template_extra">
         <div>Extra</div>
     </template>
