@@ -29,8 +29,10 @@ enum XmlTarget {
     Field(OYarn),
     /// A method of that model: `<button name=…>`.
     Method(OYarn),
-    /// An xml id the filter accepts: `ref=`, `groups=`.
+    /// An xml id the filter accepts: `ref=`, `groups=`, `<menuitem action=…>`.
     XmlId(XmlIdFilter),
+    /// A template name: `<t t-call=…>`, `<template inherit_id=…>`.
+    Template,
 }
 
 pub struct XmlCompletionFeature;
@@ -112,6 +114,9 @@ fn target_at(session: &mut SessionInfo, node: &Node, attr: &Attribute, scope: &X
             }))
         },
         (_, "groups") => Some(XmlTarget::XmlId(XmlIdFilter::Model(oyarn!("res.groups")))),
+        ("menuitem", "action") => Some(XmlTarget::XmlId(XmlIdFilter::Action)),
+        ("menuitem", "parent") => Some(XmlTarget::XmlId(XmlIdFilter::Menu)),
+        ("template", "inherit_id") | (_, "t-call" | "t-inherit") => Some(XmlTarget::Template),
         _ => None,
     }
 }
@@ -123,7 +128,27 @@ fn build_items(session: &mut SessionInfo, file_symbol: SourceFileKey, from_modul
         XmlTarget::Field(model_name) => member_items(session, from_module, model_name, typed, false),
         XmlTarget::Method(model_name) => member_items(session, from_module, model_name, typed, true),
         XmlTarget::XmlId(filter) => xml_id_items(session, file_symbol, from_module, filter, typed),
+        XmlTarget::Template => template_items(session, file_symbol, from_module, typed),
     }
+}
+
+/// Templates a `t-call` may name: the xml ids of `<template>`, and the frontend `t-name` ones.
+fn template_items(session: &mut SessionInfo, file_symbol: SourceFileKey, from_module: Option<ModuleKey>, typed: &str) -> (Vec<CompletionItem>, bool) {
+    let (mut items, mut is_incomplete) = xml_id_items(session, file_symbol, from_module, &XmlIdFilter::Template, typed);
+    let mut names = session.sync_odoo.js_templates.iter()
+        .filter(|(name, templates)| name.starts_with(typed) && templates.iter_valid(session.st()).next().is_some())
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.retain(|name| !items.iter().any(|item| item.label == *name));
+    items.extend(names.into_iter().map(|name| CompletionItem {
+        label: name,
+        kind: Some(CompletionItemKind::REFERENCE),
+        ..Default::default()
+    }));
+    is_incomplete |= items.len() > MAX_ITEMS;
+    items.truncate(MAX_ITEMS);
+    (items, is_incomplete)
 }
 
 fn xml_id_items(session: &mut SessionInfo, file_symbol: SourceFileKey, from_module: Option<ModuleKey>, filter: &XmlIdFilter, typed: &str) -> (Vec<CompletionItem>, bool) {
