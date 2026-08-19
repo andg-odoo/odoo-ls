@@ -72,16 +72,15 @@ fn test_xml_data_hover() {
     assert!(template.contains("t-name: completion_child"), "got: {template}");
     assert!(template.contains("inherits: module_xml_completion.completion_template_base"), "got: {template}");
 
-    // An asset shows the bundle and the path its fields carry.
+    // An asset keeps to its id, its bundle and path being elements the builder does not store.
     let asset = hover_at(&mut session, &views, position_after(&content, r#"ref="module_xml_completion.completion_asset"#));
     assert!(asset.contains("(XML asset) module_xml_completion.completion_asset"), "got: {asset}");
-    assert!(asset.contains("bundle: web.assets_backend"), "got: {asset}");
-    assert!(asset.contains("path: module_xml_completion/static/src/completion.js"), "got: {asset}");
+    assert!(asset.contains("file: completion_views.xml"), "got: {asset}");
 
-    // A `<delete>` claiming the same id leaves the record it removes rendered as itself.
+    // A `<delete>` names records to remove, so it contributes nothing to the id it claims.
     let deleted = hover_at(&mut session, &views, position_after(&content, r#"ref="module_xml_completion.completion_partner"#));
     assert!(deleted.contains("(XML record) module_xml_completion.completion_partner"), "got: {deleted}");
-    assert!(deleted.contains("model: res.partner"), "got: {deleted}");
+    assert!(!deleted.contains("delete"), "a delete must not be a hover subject, got: {deleted}");
 
     // A template with no t-name or t-inherit keeps the block down to what it has.
     let base = hover_at(&mut session, &views, position_after(&content, r#"inherit_id="module_xml_completion.completion_template_base"#));
