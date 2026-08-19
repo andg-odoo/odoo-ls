@@ -60,11 +60,11 @@ impl XmlCompletionFeature {
                 }
             }
         };
-        let (node, attr) = attribute_at(&document, offset)?;
+        let (node, value) = value_at(&document, offset)?;
         let from_module = session.sync_odoo.symbol_table.find_module(file_symbol);
         let scope = XmlAstUtils::scope_at(session, &node, from_module, true);
-        let target = target_at(session, &node, &attr, &scope, from_module)?;
-        let (span, typed) = completed_span(&data, &attr, offset)?;
+        let target = target_at(session, &node, &value, &scope, from_module)?;
+        let (span, typed) = completed_span(&data, &value, offset)?;
         let (mut items, is_incomplete) = build_items(session, file_symbol, from_module, &target, typed);
         let range = file_info.borrow().std_range_to_range(&span, session.sync_odoo.encoding);
         for item in items.iter_mut() {
@@ -146,26 +146,61 @@ fn close_tags(mut base: String, open_tags: &[&str]) -> String {
     base
 }
 
-/// Element and attribute whose value the cursor sits in, an empty value being an empty range.
-fn attribute_at<'a, 'input>(document: &'a Document<'input>, offset: usize) -> Option<(Node<'a, 'input>, Attribute<'a, 'input>)> {
-    for node in document.descendants().filter(|node| node.is_element()) {
+/// A value the cursor may sit in, carried with the element holding it.
+enum XmlValue<'a, 'input> {
+    /// An attribute value, the quotes around it excluded.
+    Attribute(Attribute<'a, 'input>),
+    /// The text content of the element, in the byte range the parser gave it.
+    Text(Range<usize>),
+}
+
+/// Element and value the cursor sits in, an empty one being an empty range.
+fn value_at<'a, 'input>(document: &'a Document<'input>, offset: usize) -> Option<(Node<'a, 'input>, XmlValue<'a, 'input>)> {
+    let mut empty_content = None;
+    for node in document.descendants() {
         if node.range().end < offset {
+            continue;
+        }
+        if node.is_text() && node.range().start <= offset {
+            return Some((node.parent()?, XmlValue::Text(node.range())));
+        }
+        if !node.is_element() {
             continue;
         }
         for attr in node.attributes() {
             let range = attr.range_value();
             if range.start <= offset && offset <= range.end {
-                return Some((node, attr));
+                return Some((node, XmlValue::Attribute(attr)));
             }
         }
+        // Content the parser gave no text node to, the cursor sitting right after the start tag
+        if !node.has_children() && node.range().start < offset && offset < node.range().end
+            && document.input_text().get(..offset).is_some_and(|start| start.ends_with('>'))
+        {
+            empty_content = Some(node);
+        }
     }
-    None
+    empty_content.map(|node| (node, XmlValue::Text(offset..offset)))
+}
+
+/// The value in `range` without the whitespace an element spread over several lines pads it with.
+fn trimmed_span(text: &str, range: &Range<usize>, offset: usize) -> Range<usize> {
+    let Some(value) = text.get(range.clone()) else { return offset..offset };
+    let start = range.start + value.len() - value.trim_start().len();
+    let end = start + value.trim().len();
+    match (start..=end).contains(&offset) {
+        true => start..end,
+        false => offset..offset,
+    }
 }
 
 /// Span the completion replaces and the text typed in it, `groups=` being a list of segments.
-fn completed_span<'a>(text: &'a str, attr: &Attribute, offset: usize) -> Option<(Range<usize>, &'a str)> {
-    let mut span = attr.range_value();
-    if attr.name() == "groups" {
+fn completed_span<'a>(text: &'a str, value: &XmlValue, offset: usize) -> Option<(Range<usize>, &'a str)> {
+    let mut span = match value {
+        XmlValue::Attribute(attr) => attr.range_value(),
+        XmlValue::Text(range) => trimmed_span(text, range, offset),
+    };
+    if let XmlValue::Attribute(attr) = value && attr.name() == "groups" {
         if let Some(index) = text.get(span.start..offset)?.rfind(',') {
             span.start += index + 1;
         }
@@ -179,8 +214,16 @@ fn completed_span<'a>(text: &'a str, attr: &Attribute, offset: usize) -> Option<
     Some((span, typed))
 }
 
-/// What `attr` expects, from the tag carrying it and the model in scope.
-fn target_at(session: &mut SessionInfo, node: &Node, attr: &Attribute, scope: &XmlScope, from_module: Option<ModuleKey>) -> Option<XmlTarget> {
+/// What `value` expects, from the tag carrying it and the model in scope.
+fn target_at(session: &mut SessionInfo, node: &Node, value: &XmlValue, scope: &XmlScope, from_module: Option<ModuleKey>) -> Option<XmlTarget> {
+    let attr = match value {
+        XmlValue::Attribute(attr) => attr,
+        // The text of a field naming the model a view or an action targets, and nothing else
+        XmlValue::Text(_) => return match (node.tag_name().name(), node.attribute("name")?) {
+            ("field", "model" | "res_model") => Some(XmlTarget::Model),
+            _ => None,
+        },
+    };
     match (node.tag_name().name(), attr.name()) {
         ("record", "model") => Some(XmlTarget::Model),
         ("field" | "groupby", "name") => Some(XmlTarget::Field(oyarn!("{}", scope.record_model.known()?))),

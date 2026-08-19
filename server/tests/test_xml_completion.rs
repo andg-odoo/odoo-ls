@@ -223,3 +223,32 @@ fn test_xml_completion_button_methods() {
     let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.clone() else { panic!("expected a text edit") };
     assert_eq!(edit.new_text, "action_completion_confirm");
 }
+
+/// The text of a `<field name="model">` names a model, which the walk already resolves there.
+#[test]
+fn test_xml_completion_in_field_text() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    let res_model = labels(&mut session, &path, &content, r#"<field name="res_model">module_xml_completion.pa"#);
+    assert!(res_model.contains(&"module_xml_completion.parent".to_string()), "expected a model name, got: {res_model:?}");
+
+    // A value an element spreads over several lines is replaced without its indentation.
+    let (items, _) = complete(&mut session, &path, position_after(&content, "\n            module_xml_completion.par"));
+    assert_eq!(items.iter().map(|item| item.label.clone()).collect::<Vec<_>>(), vec!["module_xml_completion.parent".to_string()]);
+    let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.clone() else { panic!("expected a text edit") };
+    assert_eq!(edit.range.start.character, 12);
+    assert_eq!(edit.range.end.character - edit.range.start.character, "module_xml_completion.par".len() as u32);
+
+    // Content the parser gives no text node to still completes, capped like any empty value.
+    let (items, is_incomplete) = complete(&mut session, &path, position_after(&content, r#"completion_empty_text_probe" model="ir.ui.view"><field name="model">"#));
+    assert!(is_incomplete && !items.is_empty() && items.len() <= 200, "expected a capped list, got {} items", items.len());
+
+    // The same text in a document that does not parse yet.
+    let broken = "<odoo>\n    <record id=\"probe\" model=\"ir.ui.view\">\n        <field name=\"model\">res.";
+    set_content(&mut session, &path, broken);
+    let typed = labels(&mut session, &path, broken, "<field name=\"model\">res.");
+    assert!(typed.contains(&"res.partner".to_string()), "expected a model name in an unparsable document, got: {typed:?}");
+}
