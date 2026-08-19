@@ -125,3 +125,21 @@ fn test_xml_completion_xml_ids() {
     let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.clone() else { panic!("expected a text edit") };
     assert_eq!(edit.range.end.character - edit.range.start.character, "base.group_us".len() as u32);
 }
+
+/// Menus, actions and templates are declared outside of `<record>`, and complete all the same.
+#[test]
+fn test_xml_completion_menus_and_templates() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    let parents = labels(&mut session, &path, &content, r#"parent="module_xml_completion.completion_menu_ro"#);
+    assert_eq!(parents, vec!["module_xml_completion.completion_menu_root".to_string()]);
+
+    let actions = labels(&mut session, &path, &content, r#"action="module_xml_completion.completion_action_par"#);
+    assert_eq!(actions, vec!["module_xml_completion.completion_action_parent".to_string()]);
+
+    let templates = labels(&mut session, &path, &content, r#"t-call="module_xml_completion.completion_template_ex"#);
+    assert_eq!(templates, vec!["module_xml_completion.completion_template_extra".to_string()]);
+}
