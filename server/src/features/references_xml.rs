@@ -4,11 +4,11 @@ use crate::{
         symbols::{
             storage::SymbolTable, symbol_keys::{ModuleKey, SymbolKey, XmlFileKey}
         },
-    }, features::{references::ReferenceTarget, xml_ast_utils::{XmlAstUtils, XmlScope}}, threads::SessionInfo
+    }, features::{references::ReferenceTarget, xml_ast_utils::{ModelScope, XmlAstUtils, XmlScope}}, threads::SessionInfo
 };
 use lsp_types::Location;
 use roxmltree::Node;
-use std::ops::Range;
+use std::{ops::Range, rc::Rc};
 
 pub enum XmlAstReferenceVisitor {
 
@@ -20,7 +20,7 @@ impl XmlAstReferenceVisitor {
         let mut results = vec![];
         let from_module = session.st().find_module(file_symbol);
         for node in root.children() {
-            XmlAstReferenceVisitor::visit_node(session, &node, from_module, XmlScope::default(), &mut results, target);
+            XmlAstReferenceVisitor::visit_node(session, &node, from_module, &XmlScope::default(), &mut results, target);
         }
         let path = session.st()[file_symbol].path.clone();
         let uri = FileMgr::pathname2uri(&path);
@@ -33,14 +33,15 @@ impl XmlAstReferenceVisitor {
         ).collect()
     }
 
-    fn visit_node<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+    fn visit_node<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         if node.is_element() {
             XmlAstReferenceVisitor::scan_format_xml_id_refs(session.st(), node, from_module, target, results);
             match node.tag_name().name()  {
                 "record" => {
                     XmlAstReferenceVisitor::visit_record(session, node, from_module, scope, results, target);
                 }
-                "field" => {
+                // `<groupby name="X">` names a many2one field and switches to its comodel.
+                "field" | "groupby" => {
                     XmlAstReferenceVisitor::visit_field(session, node, from_module, scope, results, target);
                 },
                 "menuitem" => {
@@ -67,7 +68,7 @@ impl XmlAstReferenceVisitor {
     /// record's model. When the rename/find-refs target is a method (Function on
     /// a model class), match the button's `name` value against the method name
     /// AND verify the surrounding `record_model` matches the method's class model.
-    fn visit_button<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+    fn visit_button<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         let is_action_type = node.attribute("type") == Some("action");
         if !is_action_type
             && let &ReferenceTarget::Symbol(SymbolKey::Function(target_fn)) = target
@@ -78,8 +79,8 @@ impl XmlAstReferenceVisitor {
                 let target_class = session.st().get_in_parents(target_fn.into(), &[SymType::CLASS], true);
                 let Some(SymbolKey::Class(target_class)) = target_class else { continue; };
                 let Some(target_model) = session.st()[target_class]._model.as_ref() else { continue; };
-                let Some(record_model) = scope.record_model.filter(|m| !m.is_empty()) else { continue; };
-                if target_model.name == *record_model {
+                let Some(record_model) = scope.record_model.known() else { continue; };
+                if target_model.name == record_model {
                     results.push(attr.range_value());
                 }
             }
@@ -89,10 +90,11 @@ impl XmlAstReferenceVisitor {
         }
     }
 
-    fn visit_record<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, mut scope: XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+    fn visit_record<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+        let mut scope = scope.clone();
         for attr in node.attributes() {
             if attr.name() == "model" {
-                scope.record_model = Some(attr.value());
+                scope.record_model = ModelScope::Known(Rc::from(attr.value()));
                 match target {
                     ReferenceTarget::String(s) => {
                         if attr.value() == s {
@@ -112,16 +114,16 @@ impl XmlAstReferenceVisitor {
                     results.push(attr.range_value());
                 }
         }
-        if scope.record_model == Some("ir.ui.view") {
+        if scope.record_model.known() == Some("ir.ui.view") {
             scope.view_target_model = XmlAstUtils::view_target_model(node);
         }
         for child in node.children() {
-            XmlAstReferenceVisitor::visit_node(session, &child, from_module, scope, results, target);
+            XmlAstReferenceVisitor::visit_node(session, &child, from_module, &scope, results, target);
         }
     }
 
-    fn visit_field<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
-        let mut child_scope = scope;
+    fn visit_field<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+        let mut child_scope = scope.clone();
         for attr in node.attributes() {
             if attr.name() == "name" {
                 child_scope.field_name = Some(attr.value());
@@ -129,11 +131,11 @@ impl XmlAstReferenceVisitor {
                 if !SymbolTable::is_field(session, target.into()) {continue;}
                 if session.st()[target].name != attr.value() {continue;}
                 //field name matches, but we still have to check model is the same
-                let Some(model_name) = scope.record_model.filter(|m| !m.is_empty()) else {continue;};
+                let Some(model_name) = scope.record_model.known() else {continue;};
                 let field_model = session.st().get_in_parents(target.into(), &[SymType::CLASS], true);
                 let Some(SymbolKey::Class(field_model)) = field_model else {continue;};
                 let Some(model) = session.st()[field_model]._model.as_ref() else {continue;};
-                if model.name == *model_name {
+                if model.name == model_name {
                     results.push(attr.range_value());
                 }
             } else if attr.name() == "ref"
@@ -141,22 +143,17 @@ impl XmlAstReferenceVisitor {
                     results.push(attr.range_value());
                 }
         }
-        // Inside a view's `<field name="arch">`, sub-elements resolve against the
-        // view's target model (captured at the ir.ui.view record), not the
-        // surrounding ir.ui.view itself.
-        if node.attribute("name") == Some("arch")
-            && let Some(target) = scope.view_target_model
-        {
-            child_scope.record_model = Some(target);
+        if let Some(model_scope) = XmlAstUtils::child_model_scope(session, node, scope, from_module, false) {
+            child_scope.record_model = model_scope;
         }
         for child in node.children() {
-            XmlAstReferenceVisitor::visit_node(session, &child, from_module, child_scope, results, target);
+            XmlAstReferenceVisitor::visit_node(session, &child, from_module, &child_scope, results, target);
         }
     }
 
-    fn visit_text(session: &mut SessionInfo, node: &Node, _from_module: Option<ModuleKey>, scope: XmlScope, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+    fn visit_text(session: &mut SessionInfo, node: &Node, _from_module: Option<ModuleKey>, scope: &XmlScope, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         let (Some(_model), Some(field)) = (
-            scope.record_model.filter(|m| !m.is_empty()),
+            scope.record_model.known(),
             scope.field_name.filter(|f| !f.is_empty()),
         ) else {
             return;
@@ -211,7 +208,7 @@ impl XmlAstReferenceVisitor {
         false
     }
 
-    fn visit_menu_item<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+    fn visit_menu_item<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         for attr in node.attributes() {
             if attr.name() == "action" {
                 if XmlAstReferenceVisitor::test_attr_as_xml_id(session.st(), &attr, from_module, target) {
@@ -233,7 +230,7 @@ impl XmlAstReferenceVisitor {
         }
     }
 
-    fn visit_template<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+    fn visit_template<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         for attr in node.attributes() {
             if matches!(attr.name(), "id" | "inherit_id") {
                 if XmlAstReferenceVisitor::test_attr_as_xml_id(session.st(), &attr, from_module, target) {

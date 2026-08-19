@@ -1,0 +1,34 @@
+<odoo>
+    <record id="subview_parent_view_form" model="ir.ui.view">
+        <field name="name">module_xml_subview.parent.form</field>
+        <field name="model">module_xml_subview.parent</field>
+        <field name="arch" type="xml">
+            <form string="Parent">
+                <field name="amount"/>
+                <field name="line_ids">
+                    <list>
+                        <field name="amount"/>
+                    </list>
+                </field>
+                <field name="ref_id">
+                    <form>
+                        <field name="amount"/>
+                    </form>
+                </field>
+            </form>
+        </field>
+    </record>
+
+    <record id="subview_parent_view_list" model="ir.ui.view">
+        <field name="name">module_xml_subview.parent.list</field>
+        <field name="model">module_xml_subview.parent</field>
+        <field name="arch" type="xml">
+            <list string="Parents">
+                <field name="amount"/>
+                <groupby name="tag_id">
+                    <field name="amount"/>
+                </groupby>
+            </list>
+        </field>
+    </record>
+</odoo>
