@@ -1730,9 +1730,8 @@ impl Odoo {
                         if session.sync_odoo.config.is_semantic_tokens_xml_disabled() {
                             return Ok(None);
                         }
-                        if let Some(tokens) = owl_virtual::semantic_tokens_xml(session, &file_info) {
-                            return Ok(Some(SemanticTokensResult::Tokens(tokens)));
-                        }
+                        let tokens = SemanticTokensFeature::tokens_xml(session, file_symbol, &file_info);
+                        return Ok(Some(SemanticTokensResult::Tokens(tokens)));
                     },
                     _ => {}
                 }

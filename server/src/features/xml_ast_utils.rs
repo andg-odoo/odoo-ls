@@ -27,75 +27,113 @@ pub struct XmlScope<'a> {
     pub view_target_model: Option<&'a str>,
 }
 
+/// What an XML location refers to, kept next to the symbols so consumers need not infer it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum XmlRefKind {
+    /// A model name: `<record model=…>`, `<field name="model">…</field>`.
+    Model,
+    /// A reference to an xml id: `ref=`, `groups=`, `action=`, `inherit_id=`, `%(…)d`.
+    XmlId,
+    /// The `id=` of a `<record>`, declaring the xml id rather than referencing one.
+    XmlIdDeclaration,
+    /// A field or a method of the surrounding record model: `<field name=…>`, `<button name=…>`.
+    Member,
+}
+
+/// A resolvable XML location: its kind, byte range, and symbols, empty when nothing matched.
+pub struct XmlRef {
+    pub kind: XmlRefKind,
+    pub range: Range<usize>,
+    pub symbols: Vec<SymbolKey>,
+}
+
 pub struct XmlAstUtils {}
 
 impl XmlAstUtils {
 
     pub fn get_symbols(session: &mut SessionInfo, file_symbol: SourceFileKey, root: roxmltree::Node, offset: usize, on_dep_only: bool) -> (Vec<SymbolKey>, Option<Range<usize>>) {
         let mut results = (vec![], None);
-        let from_module = session.sync_odoo.symbol_table.find_module(file_symbol);
-        for node in root.children() {
-            XmlAstUtils::visit_node(session, &node, offset, from_module, XmlScope::default(), &mut results, on_dep_only);
-        }
+        XmlAstUtils::visit_document(session, file_symbol, root, Some(offset), on_dep_only, &mut |xml_ref| {
+            results.0.extend(xml_ref.symbols);
+            results.1 = Some(xml_ref.range);
+        });
         results
     }
 
-    fn visit_node<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
-        if node.range().start > offset {
+    /// Every resolvable location of the document in source order, the walk without a cursor.
+    pub fn collect_refs(session: &mut SessionInfo, file_symbol: SourceFileKey, root: roxmltree::Node, on_dep_only: bool) -> Vec<XmlRef> {
+        let mut refs = vec![];
+        XmlAstUtils::visit_document(session, file_symbol, root, None, on_dep_only, &mut |xml_ref| refs.push(xml_ref));
+        refs
+    }
+
+    fn visit_document(session: &mut SessionInfo, file_symbol: SourceFileKey, root: roxmltree::Node, offset: Option<usize>, on_dep_only: bool, out: &mut dyn FnMut(XmlRef)) {
+        let from_module = session.sync_odoo.symbol_table.find_module(file_symbol);
+        for node in root.children() {
+            XmlAstUtils::visit_node(session, &node, offset, from_module, XmlScope::default(), out, on_dep_only);
+        }
+    }
+
+    /// Whether `range` is under the cursor, `None` taking every range.
+    fn is_at_offset(range: &Range<usize>, offset: Option<usize>) -> bool {
+        offset.is_none_or(|offset| range.start <= offset && offset <= range.end)
+    }
+
+    fn visit_node<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        if offset.is_some_and(|offset| node.range().start > offset) {
             return;
         }
         if node.is_element() {
-            XmlAstUtils::scan_format_xml_id_under_cursor(session, node, offset, from_module, results, on_dep_only);
+            XmlAstUtils::scan_format_xml_id_refs(session, node, offset, from_module, out, on_dep_only);
             match node.tag_name().name()  {
                 "record" => {
-                    XmlAstUtils::visit_record(session, node, offset, from_module, scope, results, on_dep_only);
+                    XmlAstUtils::visit_record(session, node, offset, from_module, scope, out, on_dep_only);
                 }
                 "field" => {
-                    XmlAstUtils::visit_field(session, node, offset, from_module, scope, results, on_dep_only);
+                    XmlAstUtils::visit_field(session, node, offset, from_module, scope, out, on_dep_only);
                 },
                 "menuitem" => {
-                    XmlAstUtils::visit_menu_item(session, node, offset, from_module, scope, results, on_dep_only);
+                    XmlAstUtils::visit_menu_item(session, node, offset, from_module, scope, out, on_dep_only);
                 },
                 "template" => {
-                    XmlAstUtils::visit_template(session, node, offset, from_module, scope, results, on_dep_only);
+                    XmlAstUtils::visit_template(session, node, offset, from_module, scope, out, on_dep_only);
                 }
                 "button" => {
-                    XmlAstUtils::visit_button(session, node, offset, from_module, scope, results, on_dep_only);
+                    XmlAstUtils::visit_button(session, node, offset, from_module, scope, out, on_dep_only);
                 }
                 _ => {
                     for child in node.children() {
-                        XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+                        XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
                     }
                 }
             }
         } else if node.is_text() {
-            XmlAstUtils::visit_text(session, node, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_text(session, node, offset, from_module, scope, out, on_dep_only);
         }
     }
 
-    fn visit_button<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
-        // Implicit `type` is `object` in views; only `type="action"` puts us in
-        // the xml-id case (handled by scan_format_xml_id_under_cursor).
+    fn visit_button<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        // An implicit `type` is `object` in views, only `type="action"` names an xml id.
         let is_action_type = node.attribute("type") == Some("action");
-        let attr_at_offset = node.attributes().find(|attr| attr.range_value().start <= offset && attr.range_value().end >= offset);
-        if let Some(attr) = attr_at_offset {
+        for attr in node.attributes() {
+            if !XmlAstUtils::is_at_offset(&attr.range_value(), offset) {
+                continue;
+            }
             if attr.name() == "name" && !is_action_type
                 && let Some(model_name) = scope.record_model.filter(|m| !m.is_empty())
             {
                 let found = XmlAstUtils::resolve_member_on_model(session, model_name, attr.value(), from_module, on_dep_only);
                 if !found.is_empty() {
-                    results.0.extend(found);
-                    results.1 = Some(attr.range_value());
+                    out(XmlRef { kind: XmlRefKind::Member, range: attr.range_value(), symbols: found });
                 }
             } else if attr.name() == "groups"
             && let Some(file_module) = from_module
             {
-                XmlAstUtils::add_xml_id_result(session, attr.value(), file_module.into(), attr.range_value(), results, on_dep_only);
-                results.1 = Some(attr.range_value());
+                XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlId, attr.value(), file_module, attr.range_value(), out, on_dep_only);
             }
         }
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
         }
     }
 
@@ -121,56 +159,54 @@ impl XmlAstUtils {
         out
     }
 
-    fn visit_record<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, mut scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
+    fn visit_record<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, mut scope: XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
         for attr in node.attributes() {
             if attr.name() == "model" {
                 scope.record_model = Some(attr.value());
-                if attr.range_value().start <= offset && attr.range_value().end >= offset
+                if XmlAstUtils::is_at_offset(&attr.range_value(), offset)
                     && let Some(model) = session.sync_odoo.models.get(attr.value()).cloned()
                 {
                     let from_module = match on_dep_only {
                         true => from_module,
                         false => None,
                     };
-                    results.0.extend(
-                        model.borrow().get_model_symbols(session.st(), from_module).map(SymbolKey::from)
-                        );
-                    results.1 = Some(attr.range_value());
+                    let symbols = model.borrow().get_model_symbols(session.st(), from_module).map(SymbolKey::from).collect();
+                    out(XmlRef { kind: XmlRefKind::Model, range: attr.range_value(), symbols });
                 }
             } else if attr.name() == "id"
-                && attr.range_value().start <= offset && attr.range_value().end >= offset
+                && XmlAstUtils::is_at_offset(&attr.range_value(), offset)
+                && let Some(file_module) = from_module
             {
-                XmlAstUtils::add_xml_id_result(session, attr.value(), from_module.unwrap().into(), attr.range_value(), results, on_dep_only);
-                results.1 = Some(attr.range_value());
+                XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlIdDeclaration, attr.value(), file_module, attr.range_value(), out, on_dep_only);
             }
         }
         if scope.record_model == Some("ir.ui.view") {
             scope.view_target_model = XmlAstUtils::view_target_model(node);
         }
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
         }
     }
 
-    fn visit_field<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
+    fn visit_field<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
         let mut child_scope = scope;
         for attr in node.attributes() {
             if attr.name() == "name" {
                 child_scope.field_name = Some(attr.value());
-                if attr.range_value().start <= offset && attr.range_value().end >= offset
+                if XmlAstUtils::is_at_offset(&attr.range_value(), offset)
                     && let Some(model_name) = scope.record_model.filter(|m| !m.is_empty())
                 {
                     let found = XmlAstUtils::resolve_member_on_model(session, model_name, attr.value(), from_module, on_dep_only);
                     if !found.is_empty() {
-                        results.0.extend(found);
-                        results.1 = Some(attr.range_value());
+                        out(XmlRef { kind: XmlRefKind::Member, range: attr.range_value(), symbols: found });
                     }
                 }
             } else if attr.name() == "ref"
-                && attr.range_value().start <= offset && attr.range_value().end >= offset {
-                    XmlAstUtils::add_xml_id_result(session, attr.value(), from_module.unwrap().into(), attr.range_value(), results, on_dep_only);
-                    results.1 = Some(attr.range_value());
-                }
+                && XmlAstUtils::is_at_offset(&attr.range_value(), offset)
+                && let Some(file_module) = from_module
+            {
+                XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlId, attr.value(), file_module, attr.range_value(), out, on_dep_only);
+            }
         }
         // Inside a view's `<field name="arch">`, sub-elements resolve against the
         // view's target model (captured at the ir.ui.view record), not the
@@ -181,12 +217,12 @@ impl XmlAstUtils {
             child_scope.record_model = Some(target);
         }
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, child_scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, child_scope, out, on_dep_only);
         }
     }
 
-    fn visit_text(session: &mut SessionInfo, node: &Node, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
-        if node.range().start <= offset && node.range().end >= offset {
+    fn visit_text(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, scope: XmlScope, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        if XmlAstUtils::is_at_offset(&node.range(), offset) {
             let (Some(_model), Some(field)) = (
                 scope.record_model.filter(|m| !m.is_empty()),
                 scope.field_name.filter(|f| !f.is_empty()),
@@ -194,55 +230,49 @@ impl XmlAstUtils {
                 return;
             };
             if field == "model" || field == "res_model" { //do not check model, let's assume it will contains a model name
-                XmlAstUtils::add_model_result(session, node, from_module, results, on_dep_only);
+                XmlAstUtils::emit_model(session, node, from_module, out, on_dep_only);
             }
         }
     }
 
-    fn visit_menu_item<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
-        let attr_at_offset = node.attributes().find(|attr| attr.range_value().start <= offset && attr.range_value().end >= offset);
-        if let Some(attr) = attr_at_offset
-            && matches!(attr.name(), "action" | "groups")
-        {
-            XmlAstUtils::add_xml_id_result(session, attr.value(), from_module.unwrap().into(), attr.range_value(), results, on_dep_only);
-            results.1 = Some(attr.range_value());
-        }
+    fn visit_menu_item<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["action", "groups"], out, on_dep_only);
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
         }
     }
 
-    fn visit_template<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
-        let attr_at_offset = node.attributes().find(|attr| attr.range_value().start <= offset && attr.range_value().end >= offset);
-        if let Some(attr) = attr_at_offset
-            && matches!(attr.name(), "inherit_id" | "groups")
-        {
-            XmlAstUtils::add_xml_id_result(session, attr.value(), from_module.unwrap().into(), attr.range_value(), results, on_dep_only);
-            results.1 = Some(attr.range_value());
-        }
+    fn visit_template<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["inherit_id", "groups"], out, on_dep_only);
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
         }
     }
 
-    fn scan_format_xml_id_under_cursor(session: &mut SessionInfo, node: &Node, offset: usize, from_module: Option<ModuleKey>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
+    /// Resolve each of `attr_names` present on `node` as a plain xml-id reference.
+    fn emit_attribute_xml_ids(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, attr_names: &[&str], out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        let Some(file_module) = from_module else { return };
+        for attr in node.attributes() {
+            if XmlAstUtils::is_at_offset(&attr.range_value(), offset) && attr_names.contains(&attr.name()) {
+                XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlId, attr.value(), file_module, attr.range_value(), out, on_dep_only);
+            }
+        }
+    }
+
+    fn scan_format_xml_id_refs(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
         let Some(file_module) = from_module else { return };
         let doc_text = node.document().input_text();
+        let mut hits: Vec<(String, Range<usize>)> = vec![];
         for attr in node.attributes() {
-            let attr_range = attr.range_value();
-            if offset < attr_range.start || offset > attr_range.end { continue; }
-            let mut hit: Option<(String, Range<usize>)> = None;
+            if !XmlAstUtils::is_at_offset(&attr.range_value(), offset) { continue; }
             XmlAstUtils::for_each_format_xml_id_ref(&attr, doc_text, |inner, range| {
-                if hit.is_some() { return; }
-                if range.start <= offset && offset <= range.end {
-                    hit = Some((inner.to_string(), range));
+                if XmlAstUtils::is_at_offset(&range, offset) {
+                    hits.push((inner.to_string(), range));
                 }
             });
-            if let Some((inner, range)) = hit {
-                XmlAstUtils::add_xml_id_result(session, &inner, file_module.into(), range.clone(), results, on_dep_only);
-                results.1 = Some(range);
-                return;
-            }
+        }
+        for (inner, range) in hits {
+            XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlId, &inner, file_module, range, out, on_dep_only);
         }
     }
 
@@ -294,22 +324,22 @@ impl XmlAstUtils {
         None
     }
 
-    fn add_model_result(session: &mut SessionInfo, node: &Node, from_module: Option<ModuleKey>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
+    fn emit_model(session: &mut SessionInfo, node: &Node, from_module: Option<ModuleKey>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
         if let Some(model) = session.sync_odoo.models.get(node.text().unwrap()).cloned() {
             let from_module = match on_dep_only {
                 true => from_module,
                 false => None,
             };
-            results.0.extend(
-                model.borrow().get_model_symbols(session.st(), from_module).map(SymbolKey::from)
-            );
-            results.1 = Some(node.range());
+            let symbols = model.borrow().get_model_symbols(session.st(), from_module).map(SymbolKey::from).collect();
+            out(XmlRef { kind: XmlRefKind::Model, range: node.range(), symbols });
         }
     }
 
-    fn add_xml_id_result(session: &mut SessionInfo, xml_id: &str, file_symbol: SourceFileKey, range: Range<usize>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
+    fn emit_xml_id(session: &mut SessionInfo, kind: XmlRefKind, xml_id: &str, file_module: ModuleKey, range: Range<usize>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        let file_symbol: SourceFileKey = file_module.into();
         let xml_ids = SyncOdoo::get_xml_ids(session, file_symbol, xml_id, &range, &mut vec![]);
 
+        let mut symbols = vec![];
         for xml_id in xml_ids.iter_valid(session.st()) {
             if on_dep_only
                 && let Some(module) = session.st().find_module(xml_id)
@@ -321,11 +351,12 @@ impl XmlAstUtils {
                         continue;
                     }
             if let XmlId::XmlRecord(record_key) = xml_id {
-                results.0.push(record_key.into());
+                symbols.push(record_key.into());
             } else if let XmlId::PythonClass(record_key) = xml_id {
-                results.0.push(record_key.into());
+                symbols.push(record_key.into());
             }
         }
+        out(XmlRef { kind, range, symbols });
     }
 
     /**
