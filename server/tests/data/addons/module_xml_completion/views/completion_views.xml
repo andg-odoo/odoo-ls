@@ -40,8 +40,8 @@
     <delete model="res.partner" id="completion_partner"/>
 
     <asset id="completion_asset" name="Completion Asset">
-        <field name="bundle">web.assets_backend</field>
-        <field name="path">module_xml_completion/static/src/completion.js</field>
+        <bundle>web.assets_backend</bundle>
+        <path>module_xml_completion/static/src/completion.js</path>
     </asset>
 
     <record id="completion_hover_probe" model="module_xml_completion.parent">

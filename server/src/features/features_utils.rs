@@ -969,11 +969,6 @@ impl FeaturesUtils {
                 let title = Self::full_xml_id(st, symbol, record.xml_id.as_ref()?);
                 Some(Self::format_xml_block(st, symbol, "record", &title, &[format!("model: {}", record.model.0)]))
             },
-            SymbolKey::XmlDelete(key) => {
-                let delete = &st[key];
-                let title = Self::full_xml_id(st, symbol, delete.xml_id.as_ref()?);
-                Some(Self::format_xml_block(st, symbol, "delete", &title, &[format!("model: {}", delete.model)]))
-            },
             // A menu item carries nothing else, its name and action are attributes we do not read
             SymbolKey::XmlMenuItem(key) => {
                 let title = Self::full_xml_id(st, symbol, st[key].xml_id.as_ref()?);
@@ -997,24 +992,10 @@ impl FeaturesUtils {
                 }
                 Some(Self::format_xml_block(st, symbol, "template", &title, &details))
             },
+            // `<bundle>` and `<path>` are elements the arch builder does not store
             SymbolKey::XmlAsset(key) => {
                 let title = Self::full_xml_id(st, symbol, st[key].xml_id.as_ref()?);
-                // `<bundle>` and `<path>` children are validated but not stored, only fields are
-                let fields = st[key].children();
-                let details = ["bundle", "path", "directive"].iter().filter_map(|&name| {
-                    let text = fields.iter().find_map(|&child| match child {
-                        SymbolKey::XmlField(field) if st[field].field_name.as_str() == name => st[field].text.as_ref(),
-                        _ => None,
-                    })?;
-                    Some(format!("{name}: {}", text.trim()))
-                }).collect::<Vec<_>>();
-                Some(Self::format_xml_block(st, symbol, "asset", &title, &details))
-            },
-            // A field is named rather than identified, so the title carries its name
-            SymbolKey::XmlField(key) => {
-                let field = &st[key];
-                let details = field.text.iter().map(|text| format!("value: {}", text.trim())).collect::<Vec<_>>();
-                Some(Self::format_xml_block(st, symbol, "field", &field.field_name, &details))
+                Some(Self::format_xml_block(st, symbol, "asset", &title, &[]))
             },
             _ => None,
         }
