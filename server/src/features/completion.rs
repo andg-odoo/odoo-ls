@@ -11,7 +11,7 @@ use crate::core::odoo::SyncOdoo;
 use crate::core::python_odoo_builder::ACCESS_OPERATOR_OPTIONS;
 use crate::core::symbols::storage::xml::xml_field_symbol::XmlFieldName;
 use crate::core::symbols::{FunctionSymbol, ModuleSymbol};
-use crate::core::symbols::symbol_keys::{ClassKey, ModuleKey, SourceFileKey, SymbolKey};
+use crate::core::symbols::symbol_keys::{ClassKey, FunctionKey, ModuleKey, SourceFileKey, SymbolKey};
 use crate::core::symbols::storage::SymbolTable;
 use crate::features::ast_utils::AstUtils;
 use crate::features::features_utils::FeaturesUtils;
@@ -47,6 +47,7 @@ pub enum ExpectedType {
     EXTERNAL_FIELD(OYarn), // Like in inverse_name='field_name', we attach the comodel_name
     METHOD_NAME,
     INHERITS,
+    XML_ID(Option<OYarn>), // Optional required record model, e.g. res.groups for groups="..."
 }
 
 pub struct CompletionFeature;
@@ -612,6 +613,9 @@ fn complete_call(session: &mut SessionInfo, file: SourceFileKey, expr_call: &ruf
             } else {
                 callable_sym.unwrap_function_key()
             };
+            if arg_index == 0 && let Some(xml_id_type) = xml_id_first_arg_type(session, func_key) {
+                return complete_expr(arg, session, file, offset, is_param, &[xml_id_type]);
+            }
             let is_on_instance = if callable_sym.typ() == SymType::CLASS {
                 Some(true)
             } else {
@@ -680,11 +684,17 @@ fn complete_call(session: &mut SessionInfo, file: SourceFileKey, expr_call: &ruf
     for callable_eval_sym_ptr in callable_eval_sym_ptrs.iter() {
         let callable_option = callable_eval_sym_ptr.upgrade_weak(session.st());
         let Some(callable_sym) = callable_option else {continue};
+        if callable_sym.typ() == SymType::FUNCTION
+            && keyword.arg.as_ref().is_some_and(|kw_arg_id| kw_arg_id.id == "xml_id")
+            && is_env_ref_function(session, callable_sym.unwrap_function_key()) {
+            return complete_expr(&keyword.value, session, file, offset, is_param, &[ExpectedType::XML_ID(None)]);
+        }
         if callable_sym.typ() != SymType::CLASS || !SymbolTable::is_field_class(session, callable_sym){
             continue;
         }
         let Some(expected_type) = keyword.arg.as_ref().and_then(|kw_arg_id|
             match kw_arg_id.id.as_str() {
+                "groups" => Some(vec![ExpectedType::XML_ID(Some(Sy!("res.groups")))]),
                 "related" => Some(vec![ExpectedType::NESTED_FIELD(Some(session.st().name(callable_sym).clone()))]),
                 "comodel_name" => if SymbolTable::is_specific_field_class(session, callable_sym, &["Many2one", "One2many", "Many2many"]) {
                         Some(vec![ExpectedType::MODEL_NAME])
@@ -711,6 +721,26 @@ fn complete_call(session: &mut SessionInfo, file: SourceFileKey, expr_call: &ruf
         return complete_expr(&keyword.value, session, file, offset, is_param, &expected_type);
     }
     complete_expr(&keyword.value, session, file, offset, is_param, &[])
+}
+
+/// Expected type of the first argument of the functions taking an xml_id.
+fn xml_id_first_arg_type(session: &SessionInfo, func_key: FunctionKey) -> Option<ExpectedType> {
+    if is_env_ref_function(session, func_key) {
+        return Some(ExpectedType::XML_ID(None));
+    }
+    let func = &session.st()[func_key];
+    match func.name.as_str() {
+        "has_group" | "has_groups" => matches!(func.parent(), SymbolKey::Class(class_key)
+            if session.st()[class_key]._model.as_ref().is_some_and(|model_data| model_data.name.as_str() == "res.users")),
+        // deprecated BaseModel helper (odoo <= 17)
+        "user_has_groups" => true,
+        _ => false,
+    }.then(|| ExpectedType::XML_ID(Some(Sy!("res.groups"))))
+}
+
+fn is_env_ref_function(session: &SessionInfo, func_key: FunctionKey) -> bool {
+    session.st()[func_key].evaluations.iter().any(|evaluation|
+        evaluation.symbol.get_symbol_hook.as_ref().is_some_and(|hook| hook.name == HookName::EvalEnvRef))
 }
 
 fn complete_string_literal(session: &mut SessionInfo, file: SourceFileKey, expr_string_literal: &ruff_python_ast::ExprStringLiteral, _offset: usize, _is_param: bool, expected_type: &[ExpectedType]) -> Option<CompletionResponse> {
@@ -849,6 +879,44 @@ fn complete_string_literal(session: &mut SessionInfo, file: SourceFileKey, expr_
                 main_syms.iter().filter_map(|s| s.as_class_key()).for_each(|class_key| {
                     add_model_attributes(session, &mut items, current_module, class_key.into(), false, true, false, expr_string_literal.value.to_str(), &Some(Sy!("Many2one")))
                 });
+            },
+            ExpectedType::XML_ID(model_filter) => {
+                let value = expr_string_literal.value.to_str();
+                // groups="a,!b" is a list, only the segment under the cursor is completed.
+                let prefix = match value.rfind(',') {
+                    Some(index) => &value[index + 1..],
+                    None => value,
+                }.trim_start().trim_start_matches('!');
+                let prefix_head = match prefix.rfind('.') {
+                    Some(index) => &prefix[..=index],
+                    None => "",
+                };
+                for (module_key, local_id, in_deps) in SyncOdoo::get_xml_ids_by_prefix(session, file, prefix, model_filter.as_ref()) {
+                    if !in_deps && !session.sync_odoo.config.ac_filter_model_names() {
+                        continue;
+                    }
+                    let dir_name = session.st()[module_key].dir_name.clone();
+                    let label = format!("{}.{}", dir_name, local_id);
+                    // out of deps last, then other modules, then the current one
+                    let (label_details, sort_text) = if !in_deps {
+                        (Some(CompletionItemLabelDetails {
+                            detail: None,
+                            description: Some(S!(format!("require {}", dir_name))),
+                        }), format!("~{}", label))
+                    } else if current_module == Some(module_key) {
+                        (None, format!("_{}", label))
+                    } else {
+                        (None, label.clone())
+                    };
+                    items.push(CompletionItem {
+                        insert_text: label.strip_prefix(prefix_head).map(|s| s.to_string()),
+                        label,
+                        sort_text: Some(sort_text),
+                        kind: Some(lsp_types::CompletionItemKind::REFERENCE),
+                        label_details,
+                        ..Default::default()
+                    });
+                }
             },
             ExpectedType::CLASS(_) => {},
             ExpectedType::INHERITS => {},
