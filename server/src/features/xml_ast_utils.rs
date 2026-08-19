@@ -296,7 +296,7 @@ impl XmlAstUtils {
     }
 
     /// Comodel of `field_name` on `model_name`, read from the field without following refs.
-    fn comodel_name(session: &mut SessionInfo, model_name: &str, field_name: &str, from_module: Option<ModuleKey>, on_dep_only: bool) -> Option<Rc<str>> {
+    pub fn comodel_name(session: &mut SessionInfo, model_name: &str, field_name: &str, from_module: Option<ModuleKey>, on_dep_only: bool) -> Option<Rc<str>> {
         for field in XmlAstUtils::resolve_member_on_model(session, model_name, field_name, from_module, on_dep_only) {
             match field {
                 SymbolKey::Variable(variable_key) => {

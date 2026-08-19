@@ -78,6 +78,36 @@ pub enum InitState {
     ODOO_READY,
 }
 
+/// Which xml ids a position accepts, narrowing the candidates offered there.
+#[derive(Debug, Clone)]
+pub enum XmlIdFilter {
+    Any,
+    /// Records of that model, `res.groups` for `groups=` or the comodel of a `<field ref=>`.
+    Model(OYarn),
+    /// `<menuitem>` declarations, and the `ir.ui.menu` records they are sugar for.
+    Menu,
+    /// Records of any `ir.actions.*` model.
+    Action,
+    /// `<template>` declarations.
+    Template,
+}
+
+impl XmlIdFilter {
+    fn accepts(&self, session: &SessionInfo, xml_id: XmlId) -> bool {
+        let record_model = match xml_id {
+            XmlId::XmlRecord(record_key) => Some(&session.st()[record_key].model.0),
+            _ => None,
+        };
+        match self {
+            XmlIdFilter::Any => true,
+            XmlIdFilter::Model(model) => record_model == Some(model),
+            XmlIdFilter::Menu => matches!(xml_id, XmlId::XmlMenuItem(_)) || record_model.is_some_and(|model| model == "ir.ui.menu"),
+            XmlIdFilter::Action => record_model.is_some_and(|model| model.starts_with("ir.actions.")),
+            XmlIdFilter::Template => matches!(xml_id, XmlId::XmlTemplate(_)),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct TypeshedWeakReferences {
     dict: Wk<SymbolKey>,
@@ -1527,7 +1557,7 @@ impl SyncOdoo {
     }
 
     /// Xml ids matching a prefix as (defining module, local id, in deps), filtered while iterating.
-    pub fn get_xml_ids_by_prefix(session: &SessionInfo, from_file: SourceFileKey, prefix: &str, model_filter: Option<&OYarn>) -> Vec<(ModuleKey, OYarn, bool)> {
+    pub fn get_xml_ids_by_prefix(session: &SessionInfo, from_file: SourceFileKey, prefix: &str, filter: &XmlIdFilter) -> Vec<(ModuleKey, OYarn, bool)> {
         let mut results = vec![];
         if !session.st().get_entry(from_file).borrow().is_main() {
             return results;
@@ -1539,7 +1569,7 @@ impl SyncOdoo {
             Some((module_prefix, id_prefix)) => {
                 if let Some(module_key) = session.sync_odoo.modules.get(module_prefix).copied().and_then(|m| m.upgrade(session.st())) {
                     let in_deps = ModuleSymbol::is_in_deps(session.st(), current_module, &session.st()[module_key].dir_name);
-                    SyncOdoo::collect_module_xml_ids(session, module_key, id_prefix, model_filter, in_deps, &mut results);
+                    SyncOdoo::collect_module_xml_ids(session, module_key, id_prefix, filter, in_deps, &mut results);
                 }
             },
             None => {
@@ -1549,21 +1579,16 @@ impl SyncOdoo {
                     if !dir_name.starts_with(prefix) || !ModuleSymbol::is_in_deps(session.st(), current_module, dir_name) {
                         continue;
                     }
-                    SyncOdoo::collect_module_xml_ids(session, module_key, "", model_filter, true, &mut results);
+                    SyncOdoo::collect_module_xml_ids(session, module_key, "", filter, true, &mut results);
                 }
             }
         }
         results
     }
 
-    fn collect_module_xml_ids(session: &SessionInfo, module_key: ModuleKey, id_prefix: &str, model_filter: Option<&OYarn>, in_deps: bool, results: &mut Vec<(ModuleKey, OYarn, bool)>) {
+    fn collect_module_xml_ids(session: &SessionInfo, module_key: ModuleKey, id_prefix: &str, filter: &XmlIdFilter, in_deps: bool, results: &mut Vec<(ModuleKey, OYarn, bool)>) {
         for (local_id, xml_ids) in session.st()[module_key].xml_ids.iter().filter(|(local_id, _)| local_id.starts_with(id_prefix)) {
-            let matches = match model_filter {
-                None => xml_ids.iter_valid(session.st()).next().is_some(),
-                Some(model) => xml_ids.iter_valid(session.st()).any(|xml_id|
-                    matches!(xml_id, XmlId::XmlRecord(record_key) if session.st()[record_key].model.0 == *model)),
-            };
-            if matches {
+            if xml_ids.iter_valid(session.st()).any(|xml_id| filter.accepts(session, xml_id)) {
                 results.push((module_key, local_id.clone(), in_deps));
             }
         }

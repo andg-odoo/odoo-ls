@@ -7,7 +7,7 @@ use crate::core::evaluation_context::{Context, ContextKey, ContextValue};
 use crate::core::evaluation_utils::DeepFieldEvalWalker;
 use crate::core::file_mgr::FileInfo;
 use crate::core::import_resolver;
-use crate::core::odoo::SyncOdoo;
+use crate::core::odoo::{SyncOdoo, XmlIdFilter};
 use crate::core::python_odoo_builder::ACCESS_OPERATOR_OPTIONS;
 use crate::core::symbols::storage::xml::xml_field_symbol::XmlFieldName;
 use crate::core::symbols::{FunctionSymbol, ModuleSymbol};
@@ -891,31 +891,16 @@ fn complete_string_literal(session: &mut SessionInfo, file: SourceFileKey, expr_
                     Some(index) => &prefix[..=index],
                     None => "",
                 };
-                for (module_key, local_id, in_deps) in SyncOdoo::get_xml_ids_by_prefix(session, file, prefix, model_filter.as_ref()) {
-                    if !in_deps && !session.sync_odoo.config.ac_filter_model_names() {
+                let filter = match model_filter {
+                    Some(model) => XmlIdFilter::Model(model.clone()),
+                    None => XmlIdFilter::Any,
+                };
+                for (module_key, local_id, in_deps) in SyncOdoo::get_xml_ids_by_prefix(session, file, prefix, &filter) {
+                    let Some(mut item) = build_xml_id_item(session, current_module, module_key, &local_id, in_deps) else {
                         continue;
-                    }
-                    let dir_name = session.st()[module_key].dir_name.clone();
-                    let label = format!("{}.{}", dir_name, local_id);
-                    // out of deps last, then other modules, then the current one
-                    let (label_details, sort_text) = if !in_deps {
-                        (Some(CompletionItemLabelDetails {
-                            detail: None,
-                            description: Some(S!(format!("require {}", dir_name))),
-                        }), format!("~{}", label))
-                    } else if current_module == Some(module_key) {
-                        (None, format!("_{}", label))
-                    } else {
-                        (None, label.clone())
                     };
-                    items.push(CompletionItem {
-                        insert_text: label.strip_prefix(prefix_head).map(|s| s.to_string()),
-                        label,
-                        sort_text: Some(sort_text),
-                        kind: Some(lsp_types::CompletionItemKind::REFERENCE),
-                        label_details,
-                        ..Default::default()
-                    });
+                    item.insert_text = item.label.strip_prefix(prefix_head).map(|s| s.to_string());
+                    items.push(item);
                 }
             },
             ExpectedType::CLASS(_) => {},
@@ -1232,6 +1217,33 @@ fn add_model_attributes(
             items.push(build_completion_item_from_symbol(session, vec![*final_sym], &symbol_name, context_of_symbol));
         }
     }
+}
+
+/// Completion item for one xml id candidate, `None` when the configuration hides it.
+pub(crate) fn build_xml_id_item(session: &SessionInfo, current_module: Option<ModuleKey>, module_key: ModuleKey, local_id: &OYarn, in_deps: bool) -> Option<CompletionItem> {
+    if !in_deps && !session.sync_odoo.config.ac_filter_model_names() {
+        return None;
+    }
+    let dir_name = session.st()[module_key].dir_name.clone();
+    let label = format!("{}.{}", dir_name, local_id);
+    // out of deps last, then other modules, then the current one
+    let (label_details, sort_text) = if !in_deps {
+        (Some(CompletionItemLabelDetails {
+            detail: None,
+            description: Some(S!(format!("require {}", dir_name))),
+        }), format!("~{}", label))
+    } else if current_module == Some(module_key) {
+        (None, format!("_{}", label))
+    } else {
+        (None, label.clone())
+    };
+    Some(CompletionItem {
+        label,
+        sort_text: Some(sort_text),
+        kind: Some(lsp_types::CompletionItemKind::REFERENCE),
+        label_details,
+        ..Default::default()
+    })
 }
 
 fn build_completion_item_from_symbol(session: &mut SessionInfo, symbols: Vec<SymbolKey>, symbol_name: &str, context_of_symbol: Context) -> CompletionItem {

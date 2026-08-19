@@ -6,13 +6,16 @@ use crate::constants::OYarn;
 use crate::core::evaluation::EvaluationSymbolPtr;
 use crate::core::evaluation_context::ContextKey;
 use crate::core::file_mgr::FileInfo;
+use crate::core::odoo::{SyncOdoo, XmlIdFilter};
 use crate::core::symbols::storage::SymbolTable;
 use crate::core::symbols::storage::xml::xml_field_symbol::XmlFieldName;
 use crate::core::symbols::symbol_keys::{ModuleKey, SourceFileKey, SymbolKey};
+use crate::features::completion::build_xml_id_item;
 use crate::features::xml_ast_utils::{XmlAstUtils, XmlScope};
 use crate::threads::SessionInfo;
 use crate::oyarn;
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 /// Items an XML completion answers with at most, past which the response is flagged incomplete.
@@ -26,6 +29,8 @@ enum XmlTarget {
     Field(OYarn),
     /// A method of that model: `<button name=…>`.
     Method(OYarn),
+    /// An xml id the filter accepts: `ref=`, `groups=`.
+    XmlId(XmlIdFilter),
 }
 
 pub struct XmlCompletionFeature;
@@ -45,10 +50,9 @@ impl XmlCompletionFeature {
         let (node, attr) = attribute_at(&document, offset)?;
         let from_module = session.sync_odoo.symbol_table.find_module(file_symbol);
         let scope = XmlAstUtils::scope_at(session, &node, from_module, true);
-        let target = target_at(&node, &attr, &scope)?;
-        let span = attr.range_value();
-        let typed = data.get(span.start..offset)?;
-        let (mut items, is_incomplete) = build_items(session, from_module, &target, typed);
+        let target = target_at(session, &node, &attr, &scope, from_module)?;
+        let (span, typed) = completed_span(&data, &attr, offset)?;
+        let (mut items, is_incomplete) = build_items(session, file_symbol, from_module, &target, typed);
         let range = file_info.borrow().std_range_to_range(&span, session.sync_odoo.encoding);
         for item in items.iter_mut() {
             item.text_edit = Some(CompletionTextEdit::Edit(TextEdit { range, new_text: item.label.clone() }));
@@ -73,8 +77,25 @@ fn attribute_at<'a, 'input>(document: &'a Document<'input>, offset: usize) -> Op
     None
 }
 
+/// Span the completion replaces and the text typed in it, `groups=` being a list of segments.
+fn completed_span<'a>(text: &'a str, attr: &Attribute, offset: usize) -> Option<(Range<usize>, &'a str)> {
+    let mut span = attr.range_value();
+    if attr.name() == "groups" {
+        if let Some(index) = text.get(span.start..offset)?.rfind(',') {
+            span.start += index + 1;
+        }
+        if let Some(index) = text.get(span.start..span.end)?.find(',') {
+            span.end = span.start + index;
+        }
+        let segment = text.get(span.start..offset)?;
+        span.start += segment.len() - segment.trim_start_matches([' ', '\t', '!']).len();
+    }
+    let typed = text.get(span.start..offset)?;
+    Some((span, typed))
+}
+
 /// What `attr` expects, from the tag carrying it and the model in scope.
-fn target_at(node: &Node, attr: &Attribute, scope: &XmlScope) -> Option<XmlTarget> {
+fn target_at(session: &mut SessionInfo, node: &Node, attr: &Attribute, scope: &XmlScope, from_module: Option<ModuleKey>) -> Option<XmlTarget> {
     match (node.tag_name().name(), attr.name()) {
         ("record", "model") => Some(XmlTarget::Model),
         ("field" | "groupby", "name") => Some(XmlTarget::Field(oyarn!("{}", scope.record_model.known()?))),
@@ -82,17 +103,38 @@ fn target_at(node: &Node, attr: &Attribute, scope: &XmlScope) -> Option<XmlTarge
         ("button", "name") if node.attribute("type") != Some("action") => {
             Some(XmlTarget::Method(oyarn!("{}", scope.record_model.known()?)))
         },
+        ("field", "ref") => {
+            let comodel = scope.record_model.known().zip(node.attribute("name"))
+                .and_then(|(model, field)| XmlAstUtils::comodel_name(session, model, field, from_module, true));
+            Some(XmlTarget::XmlId(match comodel {
+                Some(comodel) => XmlIdFilter::Model(oyarn!("{}", comodel)),
+                None => XmlIdFilter::Any,
+            }))
+        },
+        (_, "groups") => Some(XmlTarget::XmlId(XmlIdFilter::Model(oyarn!("res.groups")))),
         _ => None,
     }
 }
 
 /// Completion items for `target`, and whether the cap truncated them.
-fn build_items(session: &mut SessionInfo, from_module: Option<ModuleKey>, target: &XmlTarget, typed: &str) -> (Vec<CompletionItem>, bool) {
+fn build_items(session: &mut SessionInfo, file_symbol: SourceFileKey, from_module: Option<ModuleKey>, target: &XmlTarget, typed: &str) -> (Vec<CompletionItem>, bool) {
     match target {
         XmlTarget::Model => model_items(session, from_module, typed),
         XmlTarget::Field(model_name) => member_items(session, from_module, model_name, typed, false),
         XmlTarget::Method(model_name) => member_items(session, from_module, model_name, typed, true),
+        XmlTarget::XmlId(filter) => xml_id_items(session, file_symbol, from_module, filter, typed),
     }
+}
+
+fn xml_id_items(session: &mut SessionInfo, file_symbol: SourceFileKey, from_module: Option<ModuleKey>, filter: &XmlIdFilter, typed: &str) -> (Vec<CompletionItem>, bool) {
+    let mut candidates = SyncOdoo::get_xml_ids_by_prefix(session, file_symbol, typed, filter);
+    candidates.sort_by_cached_key(|(module_key, local_id, _)| (session.st()[*module_key].dir_name.clone(), local_id.clone()));
+    let is_incomplete = candidates.len() > MAX_ITEMS;
+    candidates.truncate(MAX_ITEMS);
+    let items = candidates.iter()
+        .filter_map(|(module_key, local_id, in_deps)| build_xml_id_item(session, from_module, *module_key, local_id, *in_deps))
+        .collect();
+    (items, is_incomplete)
 }
 
 fn model_items(session: &mut SessionInfo, from_module: Option<ModuleKey>, typed: &str) -> (Vec<CompletionItem>, bool) {
