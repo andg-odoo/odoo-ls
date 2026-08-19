@@ -1,0 +1,48 @@
+<odoo>
+    <record id="completion_view_form" model="ir.ui.view">
+        <field name="name">module_xml_completion.parent.form</field>
+        <field name="model">module_xml_completion.parent</field>
+        <field name="arch" type="xml">
+            <form string="Parent">
+                <field name="amo"/>
+                <field name="line_ids">
+                    <list>
+                        <field name="line_am"/>
+                    </list>
+                </field>
+                <field name="group_id" ref="base.group_us"/>
+                <field name="partner_id" ref="base.group_us"/>
+                <button name="action_completion_co" type="object"/>
+                <group groups="base.group_user,!base.group_us"/>
+            </form>
+        </field>
+    </record>
+
+    <record id="completion_view_list" model="ir.ui.view">
+        <field name="arch" type="xml">
+            <list string="Parents">
+                <field name="tot"/>
+            </list>
+        </field>
+        <field name="name">module_xml_completion.parent.list</field>
+        <field name="model">module_xml_completion.parent</field>
+    </record>
+
+    <record id="completion_action_parent" model="ir.actions.act_window">
+        <field name="name">Parents</field>
+        <field name="res_model">module_xml_completion.parent</field>
+    </record>
+
+    <record id="completion_model_probe" model="module_xml_completion.pa"/>
+
+    <menuitem id="completion_menu_root" name="Completion"/>
+    <menuitem id="completion_menu_child" name="Child" parent="module_xml_completion.completion_menu_ro" action="module_xml_completion.completion_action_par"/>
+
+    <template id="completion_template_base">
+        <div>Base</div>
+    </template>
+
+    <template id="completion_template_caller">
+        <t t-call="module_xml_completion.completion_template_ba"/>
+    </template>
+</odoo>

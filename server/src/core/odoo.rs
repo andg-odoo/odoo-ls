@@ -26,6 +26,7 @@ use crate::features::declaration::DeclarationFeature;
 use crate::features::completion::CompletionFeature;
 use crate::features::definition::DefinitionFeature;
 use crate::features::hover::HoverFeature;
+use crate::features::xml_completion::XmlCompletionFeature;
 use crate::features::signature_help::SignatureHelpFeature;
 use crate::progress_reporter::ProgressReporterPercentage;
 use crate::threads::{send_notification_via, SessionInfo, ThreadMessage, TsServerDiagnostics};
@@ -1900,9 +1901,12 @@ impl Odoo {
                         return Ok(None);
                     },
                     AstKind::XmlAst => {
-                        if let Some(list) = owl_virtual::completion_xml_owl(session, &file_info, params.text_document_position.position.line, params.text_document_position.position.character, trigger_kind) {
+                        let Position { line, character } = params.text_document_position.position;
+                        // OWL-template JS expressions first, everything else is data/view XML
+                        if let Some(list) = owl_virtual::completion_xml_owl(session, &file_info, line, character, trigger_kind) {
                             return Ok(Some(CompletionResponse::List(list)));
                         }
+                        return Ok(XmlCompletionFeature::autocomplete_xml(session, file_symbol, &file_info, line, character));
                     },
                     _ => {}
                 }
