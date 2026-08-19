@@ -528,8 +528,9 @@ impl XmlArchBuilder {
         result
     }
 
-    fn collect_t_inherit(node: &Node) -> Option<(OYarn, TextRange)> {
-        let inherit_attr = node.attribute_node("t-inherit")?;
+    /// (value, value_range) of `attribute` on `node`, the range excluding the quotes.
+    fn collect_inherit_attribute(node: &Node, attribute: &str) -> Option<(OYarn, TextRange)> {
+        let inherit_attr = node.attribute_node(attribute)?;
         let r = inherit_attr.range_value();
         Some((
             oyarn!("{}", inherit_attr.value()),
@@ -555,8 +556,11 @@ impl XmlArchBuilder {
             session.st_mut()[data].t_calls = t_calls;
         }
         // Record the `t-inherit` target — powers find-references of a template name.
-        if let Some(t_inherit) = Self::collect_t_inherit(node) {
+        if let Some(t_inherit) = Self::collect_inherit_attribute(node, "t-inherit") {
             session.st_mut()[data].t_inherit = Some(t_inherit);
+        }
+        if let Some(inherit_id) = Self::collect_inherit_attribute(node, "inherit_id") {
+            session.st_mut()[data].inherit_id = Some(inherit_id);
         }
         if let Some((t_name, range)) = &found_t_name
             && !t_name.contains(".")
