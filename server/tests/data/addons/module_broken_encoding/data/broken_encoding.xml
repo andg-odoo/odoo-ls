@@ -1,0 +1,5 @@
+<odoo>
+    <record id="broken" model="res.partner">
+        <field name="name">ÿþ not utf-8</field>
+    </record>
+</odoo>
