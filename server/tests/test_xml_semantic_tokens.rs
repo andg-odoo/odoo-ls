@@ -103,6 +103,30 @@ fn test_xml_semantic_tokens_templates() {
     assert_token(&tokens, "module_xml_completion.completion_template_base", CLASS, NO_MODIFIER);
 }
 
+/// `groups` is a list, resolved per segment on any element and through `!` negation.
+#[test]
+fn test_xml_semantic_tokens_groups() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = addon_path(&["module_xml_completion", "views", "completion_views.xml"]);
+
+    let tokens = tokens_of(&mut session, &path);
+
+    // On the `<template>` itself, on a plain `<t>` child, and on a `<group>` in a view arch.
+    assert_token(&tokens, "base.group_user", CLASS, NO_MODIFIER);
+    assert_token(&tokens, "base.group_system", CLASS, NO_MODIFIER);
+    // The range covers the id alone, never the `!` or the padding around it.
+    assert!(
+        !tokens.iter().any(|(text, _, _)| text.contains('!') || text.trim() != text),
+        "a group token must exclude the negation and the whitespace, got: {tokens:?}"
+    );
+    // The second segment of `base.group_user,!base.group_us` names nothing and stays uncoloured.
+    assert!(
+        !tokens.iter().any(|(text, _, _)| text == "base.group_us"),
+        "an unresolved group must not be coloured, got: {tokens:?}"
+    );
+}
+
 /// A `t-call` on a template of a module that is not a dependency stays uncoloured.
 #[test]
 fn test_xml_semantic_tokens_out_of_deps_template() {

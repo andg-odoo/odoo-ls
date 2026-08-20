@@ -86,6 +86,10 @@
         <div>Extra</div>
     </template>
 
+    <template id="completion_template_groups" groups="base.group_user">
+        <t groups=" base.group_system , !base.group_user ">Restricted</t>
+    </template>
+
     <template id="completion_template_caller">
         <t t-call="module_xml_completion.completion_template_base"/>
         <t t-call="module_xml_completion.completion_template_ex"/>
