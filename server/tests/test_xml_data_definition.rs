@@ -91,6 +91,12 @@ fn test_xml_data_hover() {
     let base = hover_at(&mut session, &views, position_after(&content, r#"<template id="completion_template_base"#));
     assert!(base.contains("(XML template) module_xml_completion.completion_template_base"), "got: {base}");
     assert!(!base.contains("t-name:") && !base.contains("inherits:"), "empty lines should be omitted, got: {base}");
+
+    // `groups` is a list, and only the segment under the cursor is the subject.
+    let padded = hover_at(&mut session, &views, position_after(&content, r#"groups=" base.group_system"#));
+    assert!(padded.contains("(XML record) base.group_system"), "got: {padded}");
+    let negated = hover_at(&mut session, &views, position_after(&content, "!base.group_user"));
+    assert!(negated.contains("(XML record) base.group_user"), "got: {negated}");
 }
 
 fn hover_at(session: &mut SessionInfo, path: &str, position: Position) -> String {

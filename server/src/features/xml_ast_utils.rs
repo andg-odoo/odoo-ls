@@ -110,6 +110,8 @@ impl XmlAstUtils {
             XmlAstUtils::scan_format_xml_id_refs(session, node, offset, from_module, out, on_dep_only);
             // `t-call` names a qweb view by xml id, a frontend template name resolving to nothing.
             XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["t-call"], out, on_dep_only);
+            // Any element may carry `groups`, a list rather than the single id the others hold.
+            XmlAstUtils::emit_group_ids(session, node, offset, from_module, out, on_dep_only);
             match node.tag_name().name()  {
                 "record" => {
                     XmlAstUtils::visit_record(session, node, offset, from_module, scope, out, on_dep_only);
@@ -152,10 +154,6 @@ impl XmlAstUtils {
                 if !found.is_empty() {
                     out(XmlRef { kind: XmlRefKind::Member, range: attr.range_value(), symbols: found });
                 }
-            } else if attr.name() == "groups"
-            && let Some(file_module) = from_module
-            {
-                XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlId, attr.value(), file_module, attr.range_value(), out, on_dep_only);
             }
         }
         for child in node.children() {
@@ -340,14 +338,14 @@ impl XmlAstUtils {
     }
 
     fn visit_menu_item<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
-        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["action", "parent", "groups"], out, on_dep_only);
+        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["action", "parent"], out, on_dep_only);
         for child in node.children() {
             XmlAstUtils::visit_node(session, &child, offset, from_module, scope, out, on_dep_only);
         }
     }
 
     fn visit_template<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: Option<usize>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
-        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["inherit_id", "groups"], out, on_dep_only);
+        XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["inherit_id"], out, on_dep_only);
         if let Some(id) = node.attribute_node("id")
             && XmlAstUtils::is_at_offset(&id.range_value(), offset)
             && let Some(file_module) = from_module
@@ -366,6 +364,24 @@ impl XmlAstUtils {
             if XmlAstUtils::is_at_offset(&attr.range_value(), offset) && attr_names.contains(&attr.name()) {
                 XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlId, attr.value(), file_module, attr.range_value(), out, on_dep_only);
             }
+        }
+    }
+
+    /// Resolve each group named by a `groups` attribute on `node` as its own xml-id reference.
+    fn emit_group_ids(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        let Some(file_module) = from_module else { return };
+        let Some(attr) = node.attributes().find(|attr| attr.name() == "groups") else { return };
+        if !XmlAstUtils::is_at_offset(&attr.range_value(), offset) {
+            return;
+        }
+        let mut hits: Vec<(String, Range<usize>)> = vec![];
+        XmlAstUtils::for_each_group_id(&attr, node.document().input_text(), |group, range| {
+            if XmlAstUtils::is_at_offset(&range, offset) {
+                hits.push((group.to_string(), range));
+            }
+        });
+        for (group, range) in hits {
+            XmlAstUtils::emit_xml_id(session, XmlRefKind::XmlId, &group, file_module, range, out, on_dep_only);
         }
     }
 
@@ -413,6 +429,22 @@ impl XmlAstUtils {
                 }
             }
             i += 1;
+        }
+    }
+
+    /// Each comma-separated group of `attr` with its range, `!` negated and `.` NO_ACCESS skipped.
+    pub fn for_each_group_id(attr: &Attribute, doc_text: &str, mut f: impl FnMut(&str, Range<usize>)) {
+        let attr_range = attr.range_value();
+        let attr_start = attr_range.start;
+        let value = &doc_text[attr_range];
+        let mut segment_start = 0;
+        for segment in value.split(',') {
+            let group = segment.trim().trim_start_matches('!').trim_start();
+            if !group.is_empty() && group != "." && let Some(offset) = segment.find(group) {
+                let start = attr_start + segment_start + offset;
+                f(group, start..start + group.len());
+            }
+            segment_start += segment.len() + 1;
         }
     }
 
