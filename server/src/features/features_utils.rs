@@ -1017,7 +1017,7 @@ impl FeaturesUtils {
                 Path::new(path).file_name().unwrap_or_default().to_str().unwrap_or_default().to_string()
             })
             .unwrap_or_default();
-        let mut block = format!("```\n(XML {kind}) {title}\n");
+        let mut block = format!("```python\n(XML {kind}) {title}\n");
         for detail in details {
             block.push_str(detail);
             block.push('\n');
