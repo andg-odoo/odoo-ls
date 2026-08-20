@@ -488,18 +488,18 @@ impl PythonValidator {
                             session.sync_odoo.get_main_entry().borrow_mut().not_found_symbols_for_models.insert(file_symbol);
                         }
                     }
-                    if let Some(groups_value) = eval_weak.get_weak().context.get(ContextKey::Groups).map(ContextValue::as_str)
-                        && let Some(groups_arg_range) = eval_weak.get_weak().context.get(ContextKey::GroupsArgRange).map(|ctx_val| ctx_val.as_text_range())
+                    if let Some(groups) = eval_weak.get_weak().context.get(ContextKey::Groups).map(ContextValue::as_str)
+                        && let Some(groups_range) = eval_weak.get_weak().context.get(ContextKey::GroupsArgRange).map(ContextValue::as_text_range)
                         && let Some(file_symbol) = session.st().get_file(class.into()) {
-                        // Entries may be negated with '!', and '.' is NO_ACCESS, not an xml_id
-                        let missing_groups = groups_value.split(',').map(|group| group.trim().trim_start_matches('!')).filter(|group| !group.is_empty() && *group != ".")
-                            .filter(|group| !SyncOdoo::get_xml_ids(session, file_symbol, group, &(0..0), &mut vec![]).iter_valid(session.st())
-                                .any(|xml_id| matches!(xml_id, XmlId::XmlRecord(record_key) if session.st()[record_key].model.0 == "res.groups")))
+                        // an entry may be negated with '!', and a lone '.' is odoo.fields.NO_ACCESS
+                        let missing_groups = groups.split(',').map(|group| group.trim().trim_start_matches('!'))
+                            .filter(|group| !group.is_empty() && *group != "."
+                                && !SyncOdoo::is_group_xml_id(session, file_symbol, group, &(0..0), &mut vec![]))
                             .collect::<Vec<_>>();
                         if !missing_groups.is_empty()
                             && let Some(diagnostic_base) = create_diagnostic(session, DiagnosticCode::OLS05054, &[&missing_groups.join(", ")]) {
                                 self.diagnostics.push(Diagnostic {
-                                    range: Range::new(Position::new(groups_arg_range.start().to_u32(), 0), Position::new(groups_arg_range.end().to_u32(), 0)),
+                                    range: Range::new(Position::new(groups_range.start().to_u32(), 0), Position::new(groups_range.end().to_u32(), 0)),
                                     ..diagnostic_base
                                 });
                             }

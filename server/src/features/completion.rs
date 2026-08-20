@@ -47,7 +47,7 @@ pub enum ExpectedType {
     EXTERNAL_FIELD(OYarn), // Like in inverse_name='field_name', we attach the comodel_name
     METHOD_NAME,
     INHERITS,
-    XML_ID(Option<OYarn>), // Optional required record model, e.g. res.groups for groups="..."
+    XML_ID(Option<OYarn>), // the model the record must have, e.g. res.groups for a groups list
 }
 
 pub struct CompletionFeature;
@@ -690,11 +690,6 @@ fn complete_call(session: &mut SessionInfo, file: SourceFileKey, expr_call: &ruf
     for callable_eval_sym_ptr in callable_eval_sym_ptrs.iter() {
         let callable_option = callable_eval_sym_ptr.upgrade_weak(session.st());
         let Some(callable_sym) = callable_option else {continue};
-        if callable_sym.typ() == SymType::FUNCTION
-            && keyword.arg.as_ref().is_some_and(|kw_arg_id| kw_arg_id.id == "xml_id")
-            && is_env_ref_function(session, callable_sym.unwrap_function_key()) {
-            return complete_expr(&keyword.value, session, file, offset, is_param, &[ExpectedType::XML_ID(None)]);
-        }
         if callable_sym.typ() != SymType::CLASS || !SymbolTable::is_field_class(session, callable_sym){
             continue;
         }
@@ -734,22 +729,14 @@ fn complete_call(session: &mut SessionInfo, file: SourceFileKey, expr_call: &ruf
 
 /// Expected type of the first argument of the functions taking an xml_id.
 fn xml_id_first_arg_type(session: &SessionInfo, func_key: FunctionKey) -> Option<ExpectedType> {
-    if is_env_ref_function(session, func_key) {
+    let func = &session.st()[func_key];
+    if func.evaluations.iter().any(|evaluation|
+        evaluation.symbol.get_symbol_hook.as_ref().is_some_and(|hook| hook.name == HookName::EvalEnvRef)) {
         return Some(ExpectedType::XML_ID(None));
     }
-    let func = &session.st()[func_key];
-    match func.name.as_str() {
-        "has_group" | "has_groups" => matches!(func.parent(), SymbolKey::Class(class_key)
-            if session.st()[class_key]._model.as_ref().is_some_and(|model_data| model_data.name.as_str() == "res.users")),
-        // deprecated BaseModel helper (odoo <= 17)
-        "user_has_groups" => true,
-        _ => false,
-    }.then(|| ExpectedType::XML_ID(Some(Sy!("res.groups"))))
-}
-
-fn is_env_ref_function(session: &SessionInfo, func_key: FunctionKey) -> bool {
-    session.st()[func_key].evaluations.iter().any(|evaluation|
-        evaluation.symbol.get_symbol_hook.as_ref().is_some_and(|hook| hook.name == HookName::EvalEnvRef))
+    // `user_has_groups` is the BaseModel helper deprecated in 17.0, the others live on res.users
+    matches!(func.name.as_str(), "has_group" | "has_groups" | "user_has_groups")
+        .then(|| ExpectedType::XML_ID(Some(Sy!("res.groups"))))
 }
 
 fn complete_string_literal(session: &mut SessionInfo, file: SourceFileKey, expr_string_literal: &ruff_python_ast::ExprStringLiteral, _offset: usize, _is_param: bool, expected_type: &[ExpectedType]) -> Option<CompletionResponse> {
@@ -890,16 +877,9 @@ fn complete_string_literal(session: &mut SessionInfo, file: SourceFileKey, expr_
                 });
             },
             ExpectedType::XML_ID(model_filter) => {
-                let value = expr_string_literal.value.to_str();
-                // groups="a,!b" is a list, only the segment under the cursor is completed.
-                let prefix = match value.rfind(',') {
-                    Some(index) => &value[index + 1..],
-                    None => value,
-                }.trim_start().trim_start_matches('!');
-                let prefix_head = match prefix.rfind('.') {
-                    Some(index) => &prefix[..=index],
-                    None => "",
-                };
+                // a `groups` value is a list, so only the segment being typed is completed
+                let prefix = expr_string_literal.value.to_str().rsplit(',').next().unwrap_or_default().trim_start().trim_start_matches('!');
+                let prefix_head = prefix.rfind('.').map_or("", |index| &prefix[..=index]);
                 let filter = match model_filter {
                     Some(model) => XmlIdFilter::Model(model.clone()),
                     None => XmlIdFilter::Any,
