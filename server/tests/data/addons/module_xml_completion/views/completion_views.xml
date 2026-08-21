@@ -95,4 +95,21 @@
         <t t-call="module_xml_completion.completion_template_ex"/>
         <t t-call="module_xml_completion.completion_template_child"/>
     </template>
+
+    <record id="completion_view_modifiers" model="ir.ui.view">
+        <field name="model">module_xml_completion.parent</field>
+        <field name="arch" type="xml">
+            <form string="Parent">
+                <group invisible="not amo">
+                    <field readonly="tot" name="line_ids">
+                        <list>
+                            <field name="parent_id" column_invisible="parent.tot"/>
+                            <field name="parent_id" invisible="line_amo"/>
+                            <field name="parent_id" invisible="state == 'dra'"/>
+                        </list>
+                    </field>
+                </group>
+            </form>
+        </field>
+    </record>
 </odoo>

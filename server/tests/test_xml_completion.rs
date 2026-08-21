@@ -75,6 +75,32 @@ fn test_xml_completion() {
     assert_eq!(methods, vec!["action_completion_confirm".to_string()], "expected a method of the target model");
 }
 
+/// A modifier expression completes the fields of the model in scope, one identifier at a time.
+#[test]
+fn test_xml_completion_modifiers() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    // Only the identifier under the cursor is completed, and replaced.
+    let (items, _) = complete(&mut session, &path, position_after(&content, r#"invisible="not amo"#));
+    assert_eq!(items.iter().map(|item| item.label.clone()).collect::<Vec<_>>(), vec!["amount".to_string()]);
+    let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.clone() else { panic!("expected a text edit") };
+    assert_eq!(edit.range.end.character - edit.range.start.character, 3);
+
+    // The modifiers of a `<field>` holding a subview belong to the model above it.
+    assert_eq!(labels(&mut session, &path, &content, r#"readonly="tot"#), vec!["total".to_string()]);
+
+    // Inside the subview a name is a field of the comodel, and `parent.` one of the model above.
+    assert_eq!(labels(&mut session, &path, &content, r#"invisible="line_amo"#), vec!["line_amount".to_string()]);
+    assert_eq!(labels(&mut session, &path, &content, r#"column_invisible="parent.tot"#), vec!["total".to_string()]);
+
+    // A string literal holds a value rather than a field name.
+    let quoted = labels(&mut session, &path, &content, r#"invisible="state == 'dra"#);
+    assert!(quoted.is_empty(), "expected no completion inside a string literal, got: {quoted:?}");
+}
+
 /// The field type, and the comodel of a relational field, annotate the completion item.
 #[test]
 fn test_xml_completion_field_details() {

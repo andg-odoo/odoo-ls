@@ -11,6 +11,7 @@ use crate::core::symbols::storage::SymbolTable;
 use crate::core::symbols::storage::xml::xml_field_symbol::XmlFieldName;
 use crate::core::symbols::symbol_keys::{ModuleKey, SourceFileKey, SymbolKey};
 use crate::features::completion::build_xml_id_item;
+use crate::features::owl_expr::decode_entities;
 use crate::features::xml_ast_utils::{XmlAstUtils, XmlScope};
 use crate::threads::SessionInfo;
 use crate::oyarn;
@@ -63,7 +64,7 @@ impl XmlCompletionFeature {
         let (node, value) = value_at(&document, offset)?;
         let from_module = session.sync_odoo.symbol_table.find_module(file_symbol);
         let scope = XmlAstUtils::scope_at(session, &node, from_module, true);
-        let target = target_at(session, &node, &value, &scope, from_module)?;
+        let target = target_at(session, &node, &value, &scope, from_module, offset)?;
         let (span, typed) = completed_span(&data, &value, offset)?;
         let (mut items, is_incomplete) = build_items(session, file_symbol, from_module, &target, typed);
         let range = file_info.borrow().std_range_to_range(&span, session.sync_odoo.encoding);
@@ -210,12 +211,40 @@ fn completed_span<'a>(text: &'a str, value: &XmlValue, offset: usize) -> Option<
         let segment = text.get(span.start..offset)?;
         span.start += segment.len() - segment.trim_start_matches([' ', '\t', '!']).len();
     }
+    if let XmlValue::Attribute(attr) = value && XmlAstUtils::is_modifier_attribute(attr.name()) {
+        span = modifier_identifier(text, attr, offset)?;
+    }
     let typed = text.get(span.start..offset)?;
     Some((span, typed))
 }
 
+/// Range of the identifier `offset` sits on in a modifier expression, none inside a string literal.
+fn modifier_identifier(text: &str, attr: &Attribute, offset: usize) -> Option<Range<usize>> {
+    let value_range = attr.range_value();
+    // Entities are decoded, `&quot;` opening a string literal, the decode keeping every offset.
+    let value = decode_entities(text.get(value_range.clone())?);
+    let local = offset.checked_sub(value_range.start)?;
+    let mut quote: Option<char> = None;
+    for character in value.get(..local)?.chars() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (None, '"' | '\'') => quote = Some(character),
+            _ => {},
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
+    let start = value[..local].char_indices().rev()
+        .find(|(_, character)| !is_identifier(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let end = local + value[local..].find(|character: char| !is_identifier(character)).unwrap_or(value.len() - local);
+    Some(value_range.start + start..value_range.start + end)
+}
+
 /// What `value` expects, from the tag carrying it and the model in scope.
-fn target_at(session: &mut SessionInfo, node: &Node, value: &XmlValue, scope: &XmlScope, from_module: Option<ModuleKey>) -> Option<XmlTarget> {
+fn target_at(session: &mut SessionInfo, node: &Node, value: &XmlValue, scope: &XmlScope, from_module: Option<ModuleKey>, offset: usize) -> Option<XmlTarget> {
     let attr = match value {
         XmlValue::Attribute(attr) => attr,
         // The text of a field naming the model a view or an action targets, and nothing else
@@ -243,6 +272,15 @@ fn target_at(session: &mut SessionInfo, node: &Node, value: &XmlValue, scope: &X
         ("menuitem", "action") => Some(XmlTarget::XmlId(XmlIdFilter::Action)),
         ("menuitem", "parent") => Some(XmlTarget::XmlId(XmlIdFilter::Menu)),
         ("template", "inherit_id") | (_, "t-call" | "t-inherit") => Some(XmlTarget::Template),
+        (_, name) if XmlAstUtils::is_modifier_attribute(name) => {
+            let doc_text = node.document().input_text();
+            let identifier = modifier_identifier(doc_text, attr, offset)?;
+            let model = match doc_text[..identifier.start].ends_with("parent.") {
+                true => &scope.parent_model,
+                false => &scope.record_model,
+            };
+            Some(XmlTarget::Field(oyarn!("{}", model.known()?)))
+        },
         _ => None,
     }
 }
