@@ -79,6 +79,28 @@ fn test_xml_domain_fields() {
     assert_definitions(&mut session, &views, position, &models, &[]);
 }
 
+/// A context names a field of the target model in a `default_` key, and of its own in `group_by`.
+#[test]
+fn test_xml_context_fields() {
+    let (mut odoo, config) = setup_server(true);
+    let mut session = create_init_session(&mut odoo, config);
+    let module = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests").join("data").join("addons").join("module_xml_subview");
+    let views = module.join("views").join("subview_views.xml").sanitize();
+    let models = module.join("models").join("subview_models.py").sanitize();
+    let content = std::fs::read_to_string(&views).unwrap();
+
+    // The default lands on a record of the comodel, while the grouping is on the model in scope.
+    let position = position_after(&content, r#"{'default_amount"#);
+    assert_definitions(&mut session, &views, position, &models, &[17]);
+    let position = position_after(&content, r#"'group_by': 'amount"#);
+    assert_definitions(&mut session, &views, position, &models, &[7]);
+
+    // A value of the context is a field of the model in scope, as in a modifier.
+    let position = position_after(&content, r#"'default_amount': tag_id"#);
+    assert_definitions(&mut session, &views, position, &models, &[9]);
+}
+
 fn assert_definitions(session: &mut SessionInfo, path: &str, position: Position, target_path: &str, expected_lines: &[u32]) {
     let params = GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {

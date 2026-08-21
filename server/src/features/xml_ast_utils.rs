@@ -66,7 +66,7 @@ pub struct XmlScope<'a> {
 
 /// A field name a python attribute holds, and the model it belongs to.
 pub enum ExprField {
-    /// A dotted path of the model the attribute targets.
+    /// A dotted path of the model the attribute targets, a domain leaf or a `default_` key.
     OnTarget(String, Range<usize>),
     /// A name of the model in scope, `parent.<field>` naming one of the model above.
     OnCurrent(String, Range<usize>, bool),
@@ -570,10 +570,29 @@ impl XmlAstUtils {
         // A value spread over several lines only parses as if parenthesized, as lxml joins it.
         let Ok(parsed) = parse_parenthesized_expression_range(&expr, TextRange::up_to(expr.text_len())) else { return };
         let shifted = |range: TextRange| attr_start + usize::from(range.start())..attr_start + usize::from(range.end());
-        if attr.name() == "domain" {
-            for_each_domain_leaf(parsed.expr(), &mut |field| {
+        match (attr.name(), parsed.expr()) {
+            ("domain", domain) => for_each_domain_leaf(domain, &mut |field| {
                 f(ExprField::OnTarget(field.value.to_str().to_string(), shifted(literal_content(field))));
-            });
+            }),
+            // Only the top-level keys are context keys, a nested dict being a value of its own.
+            ("context", Expr::Dict(context)) => for item in context.items.iter() {
+                let Some(Expr::StringLiteral(key)) = item.key.as_ref() else { continue };
+                let key_name = key.value.to_str();
+                if let Some(field) = key_name.strip_prefix("default_") {
+                    // The default lands on the record the key creates, one of the target model.
+                    let content = literal_content(key);
+                    let start = content.end() - TextSize::new(field.len() as u32);
+                    f(ExprField::OnTarget(field.to_string(), shifted(TextRange::new(start, content.end()))));
+                } else if key_name == "group_by" && let Expr::StringLiteral(value) = &item.value {
+                    // odoo reads the granularity of `date:month` off the field name it groups by.
+                    let name = value.value.to_str();
+                    let name = name.split_once(':').map_or(name, |(field, _)| field);
+                    let content = literal_content(value);
+                    let end = content.start() + TextSize::new(name.len() as u32);
+                    f(ExprField::OnCurrent(name.to_string(), shifted(TextRange::new(content.start(), end)), false));
+                }
+            },
+            _ => {},
         }
         let mut visitor = ExpressionValueVisitor { hits: vec![] };
         visitor.visit_expr(parsed.expr());
@@ -760,6 +779,16 @@ mod tests {
         // A leaf compared against a name is a value of the model in scope rather than a path.
         assert_eq!(names("<filter domain=\"[('a','=',parent_id)]\"/>"), ["a"]);
         assert_eq!(names_of("<filter domain=\"[('a','=',parent_id)]\"/>"), ["parent_id"]);
+    }
+
+    /// A context names a field of the target model in `default_`, and of its own in `group_by`.
+    #[test]
+    fn for_each_expression_field_yields_the_fields_a_context_key_names() {
+        assert_eq!(target_fields("<field context=\"{'default_state': 'draft'}\"/>"), [("state".to_string(), 26..31)]);
+        assert_eq!(modifier_fields("<field context=\"{'group_by': 'date:month'}\"/>"), [("date".to_string(), 30..34, false)]);
+        // Any other key names a field of neither, and a nested dict holds no context key at all.
+        assert!(target_fields("<field context=\"{'search_default_draft': 1}\"/>").is_empty());
+        assert_eq!(target_fields("<field context=\"{'default_line': {'default_state': 1}}\"/>").len(), 1);
     }
 
     #[test]

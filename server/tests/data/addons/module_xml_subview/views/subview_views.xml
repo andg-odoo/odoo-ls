@@ -61,6 +61,7 @@
                     </list>
                 </field>
                 <field name="tag_id" domain="[('amount',"/>
+                <field name="line_ids" context="{'default_amount': tag_id, 'group_by': 'amount'}"/>
             </form>
         </field>
     </record>
