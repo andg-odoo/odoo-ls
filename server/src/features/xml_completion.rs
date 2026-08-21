@@ -212,35 +212,36 @@ fn completed_span<'a>(text: &'a str, value: &XmlValue, offset: usize) -> Option<
         span.start += segment.len() - segment.trim_start_matches([' ', '\t', '!']).len();
     }
     if let XmlValue::Attribute(attr) = value && XmlAstUtils::is_expression_attribute(attr.name()) {
-        span = modifier_identifier(text, attr, offset)?;
+        span = expression_name(text, attr, offset)?.0;
     }
     let typed = text.get(span.start..offset)?;
     Some((span, typed))
 }
 
-/// Range of the identifier `offset` sits on in a python expression, none inside a string literal.
-fn modifier_identifier(text: &str, attr: &Attribute, offset: usize) -> Option<Range<usize>> {
+/// Range of the name `offset` completes, and the path before it when it sits in a string literal.
+fn expression_name(text: &str, attr: &Attribute, offset: usize) -> Option<(Range<usize>, Option<String>)> {
     let value_range = attr.range_value();
     // Entities are decoded, `&quot;` opening a string literal, the decode keeping every offset.
     let value = decode_entities(text.get(value_range.clone())?);
     let local = offset.checked_sub(value_range.start)?;
-    let mut quote: Option<char> = None;
-    for character in value.get(..local)?.chars() {
+    let mut quote: Option<(char, usize)> = None;
+    for (index, character) in value.get(..local)?.char_indices() {
         match (quote, character) {
-            (Some(open), _) if character == open => quote = None,
-            (None, '"' | '\'') => quote = Some(character),
+            (Some((open, _)), _) if character == open => quote = None,
+            (None, '"' | '\'') => quote = Some((character, index + character.len_utf8())),
             _ => {},
         }
-    }
-    if quote.is_some() {
-        return None;
     }
     let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
     let start = value[..local].char_indices().rev()
         .find(|(_, character)| !is_identifier(*character))
         .map_or(0, |(index, character)| index + character.len_utf8());
     let end = local + value[local..].find(|character: char| !is_identifier(character)).unwrap_or(value.len() - local);
-    Some(value_range.start + start..value_range.start + end)
+    let path = match quote {
+        Some((_, content)) => Some(value.get(content..start)?.trim_end_matches('.').to_string()),
+        None => None,
+    };
+    Some((value_range.start + start..value_range.start + end, path))
 }
 
 /// What `value` expects, from the tag carrying it and the model in scope.
@@ -274,12 +275,23 @@ fn target_at(session: &mut SessionInfo, node: &Node, value: &XmlValue, scope: &X
         ("template", "inherit_id") | (_, "t-call" | "t-inherit") => Some(XmlTarget::Template),
         (_, name) if XmlAstUtils::is_expression_attribute(name) => {
             let doc_text = node.document().input_text();
-            let identifier = modifier_identifier(doc_text, attr, offset)?;
-            let model = match doc_text[..identifier.start].ends_with("parent.") {
-                true => &scope.parent_model,
-                false => &scope.record_model,
+            let (identifier, path) = expression_name(doc_text, attr, offset)?;
+            let Some(path) = path else {
+                let model = match doc_text[..identifier.start].ends_with("parent.") {
+                    true => &scope.parent_model,
+                    false => &scope.record_model,
+                };
+                return Some(XmlTarget::Field(oyarn!("{}", model.known()?)));
             };
-            Some(XmlTarget::Field(oyarn!("{}", model.known()?)))
+            // Only a domain names fields in its literals, any other one holding a value.
+            if attr.name() != "domain" {
+                return None;
+            }
+            let mut model = XmlAstUtils::expression_target_model(session, node, scope, from_module, true)?;
+            for segment in path.split('.').filter(|segment| !segment.is_empty()) {
+                model = XmlAstUtils::comodel_name(session, &model, segment, from_module, true)?;
+            }
+            Some(XmlTarget::Field(oyarn!("{}", model)))
         },
         _ => None,
     }

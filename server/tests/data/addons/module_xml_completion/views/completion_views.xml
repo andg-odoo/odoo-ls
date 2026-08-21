@@ -112,4 +112,14 @@
             </form>
         </field>
     </record>
+
+    <record id="completion_view_domains" model="ir.ui.view">
+        <field name="model">module_xml_completion.parent</field>
+        <field name="arch" type="xml">
+            <search string="Parents">
+                <field domain="[('line_am', '=', amo), ('parent_id.tot', '!=', False)]" context="{'default_partner_id': amo}" name="line_ids"/>
+                <filter name="rich" domain="[('tot', '&gt;', 0)]"/>
+            </search>
+        </field>
+    </record>
 </odoo>

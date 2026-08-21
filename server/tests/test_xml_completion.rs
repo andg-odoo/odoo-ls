@@ -101,6 +101,25 @@ fn test_xml_completion_modifiers() {
     assert!(quoted.is_empty(), "expected no completion inside a string literal, got: {quoted:?}");
 }
 
+/// A domain completes the fields of the model it targets in its literals, values apart.
+#[test]
+fn test_xml_completion_domains() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let path = views_path().sanitize();
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    // A literal names a field of the comodel of the `<field>`, one segment of the path at a time.
+    assert_eq!(labels(&mut session, &path, &content, r#"domain="[('line_am"#), vec!["line_amount".to_string()]);
+    assert_eq!(labels(&mut session, &path, &content, r#"('parent_id.tot"#), vec!["total".to_string()]);
+    // A value belongs to the model in scope, as in a modifier.
+    assert_eq!(labels(&mut session, &path, &content, r#"'=', amo"#), vec!["amount".to_string()]);
+    assert_eq!(labels(&mut session, &path, &content, r#"'default_partner_id': amo"#), vec!["amount".to_string()]);
+
+    // A `<filter>` does not retarget, its literals naming the fields of the view's own model.
+    assert_eq!(labels(&mut session, &path, &content, r#"rich" domain="[('tot"#), vec!["total".to_string()]);
+}
+
 /// The field type, and the comodel of a relational field, annotate the completion item.
 #[test]
 fn test_xml_completion_field_details() {
