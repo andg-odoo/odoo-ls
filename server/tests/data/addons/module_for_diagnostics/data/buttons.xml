@@ -8,7 +8,7 @@
         <field name="model">bike_parts.wheel</field>
         <field name="arch" type="xml">
             <form>
-                <field name="name"/>
+                <field name="name" invisible="not name"/>
                 <button name="action_set_available" type="object" string="Make Available"/>
             </form>
         </field>

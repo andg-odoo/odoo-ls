@@ -36,6 +36,7 @@ impl XmlAstReferenceVisitor {
     fn visit_node<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         if node.is_element() {
             XmlAstReferenceVisitor::scan_format_xml_id_refs(session.st(), node, from_module, target, results);
+            XmlAstReferenceVisitor::visit_modifiers(session, node, scope, results, target);
             match node.tag_name().name()  {
                 "record" => {
                     XmlAstReferenceVisitor::visit_record(session, node, from_module, scope, results, target);
@@ -87,6 +88,28 @@ impl XmlAstReferenceVisitor {
         }
         for child in node.children() {
             XmlAstReferenceVisitor::visit_node(session, &child, from_module, scope, results, target);
+        }
+    }
+
+    /// A modifier expression names fields of the model in scope, `parent.x` one of the model above.
+    fn visit_modifiers(session: &mut SessionInfo, node: &Node, scope: &XmlScope, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+        let &ReferenceTarget::Symbol(SymbolKey::Variable(target)) = target else { return };
+        if !SymbolTable::is_field(session, target.into()) { return }
+        let field_class = session.st().get_in_parents(target.into(), &[SymType::CLASS], true);
+        let Some(SymbolKey::Class(field_class)) = field_class else { return };
+        let Some(model_name) = session.st()[field_class]._model.as_ref().map(|model| model.name.clone()) else { return };
+        let field_name = session.st()[target].name.clone();
+        let doc_text = node.document().input_text();
+        for attr in node.attributes().filter(|attr| XmlAstUtils::is_modifier_attribute(attr.name())) {
+            XmlAstUtils::for_each_modifier_field(&attr, doc_text, |name, range, on_parent| {
+                let scope_model = match on_parent {
+                    true => &scope.parent_model,
+                    false => &scope.record_model,
+                };
+                if field_name == name && scope_model.known().is_some_and(|model| model_name == model) {
+                    results.push(range);
+                }
+            });
         }
     }
 
@@ -144,6 +167,10 @@ impl XmlAstReferenceVisitor {
                 }
         }
         if let Some(model_scope) = XmlAstUtils::child_model_scope(session, node, scope, from_module, false) {
+            // Only a subview nests a model in another, the arch of a view has none above it.
+            if child_scope.field_name != Some("arch") {
+                child_scope.parent_model = child_scope.record_model.clone();
+            }
             child_scope.record_model = model_scope;
         }
         for child in node.children() {
