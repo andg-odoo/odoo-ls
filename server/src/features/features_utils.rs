@@ -164,6 +164,20 @@ impl FeaturesUtils {
         SymbolTable::get_member_symbol(session, parent_class.into(), field_name, from_module, false, true, false, true, false).0
     }
 
+    /// Fields a dotted path names on `model_name`, the model-name entry to `find_nested_fields`.
+    pub fn find_model_fields(
+        session: &mut SessionInfo,
+        model_name: &str,
+        from_module: Option<ModuleKey>,
+        field_range: &TextRange,
+        field_name: &str,
+        pick: SegmentPick,
+    ) -> Vec<(SymbolKey, TextRange)> {
+        let Some(model) = session.sync_odoo.models.get(model_name).cloned() else { return vec![] };
+        let base_symbol = model.borrow().get_main_symbols(session, from_module).next();
+        base_symbol.map_or(vec![], |base_symbol| FeaturesUtils::find_nested_fields(session, base_symbol, from_module, field_range, field_name, pick))
+    }
+
     fn find_nested_fields(
         session: &mut SessionInfo,
         base_symbol: ModelSymbolKey,

@@ -131,6 +131,8 @@ fn test_references() {
     assert_in_result(&mut references, "module_for_diagnostics/data/buttons.xml", 10, 29);
     // the same field named by the `invisible` modifier of that arch field
     assert_in_result(&mut references, "module_for_diagnostics/data/buttons.xml", 10, 50);
+    // and by the domain of a `<field>` whose comodel is bike_parts.wheel
+    assert_in_result(&mut references, "module_for_diagnostics/data/buttons.xml", 20, 50);
 
     //references on a Python method invoked by <button name="..." type="object"/> inside arch
     let mut references = get_references(&mut session, &bike_wheel_py, Position::new(13, 8));

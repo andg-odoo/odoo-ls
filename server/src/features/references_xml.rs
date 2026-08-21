@@ -4,10 +4,11 @@ use crate::{
         symbols::{
             storage::SymbolTable, symbol_keys::{ModuleKey, SymbolKey, XmlFileKey}
         },
-    }, features::{references::ReferenceTarget, xml_ast_utils::{ModelScope, XmlAstUtils, XmlScope}}, threads::SessionInfo
+    }, features::{features_utils::{FeaturesUtils, SegmentPick}, references::ReferenceTarget, xml_ast_utils::{ExprField, ModelScope, XmlAstUtils, XmlScope}}, threads::SessionInfo
 };
 use lsp_types::Location;
 use roxmltree::Node;
+use ruff_text_size::{TextRange, TextSize};
 use std::{ops::Range, rc::Rc};
 
 pub enum XmlAstReferenceVisitor {
@@ -36,7 +37,7 @@ impl XmlAstReferenceVisitor {
     fn visit_node<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, from_module: Option<ModuleKey>, scope: &XmlScope<'a>, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         if node.is_element() {
             XmlAstReferenceVisitor::scan_format_xml_id_refs(session.st(), node, from_module, target, results);
-            XmlAstReferenceVisitor::visit_modifiers(session, node, scope, results, target);
+            XmlAstReferenceVisitor::visit_expressions(session, node, from_module, scope, results, target);
             match node.tag_name().name()  {
                 "record" => {
                     XmlAstReferenceVisitor::visit_record(session, node, from_module, scope, results, target);
@@ -91,8 +92,8 @@ impl XmlAstReferenceVisitor {
         }
     }
 
-    /// A modifier expression names fields of the model in scope, `parent.x` one of the model above.
-    fn visit_modifiers(session: &mut SessionInfo, node: &Node, scope: &XmlScope, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
+    /// A python attribute names fields of the model in scope, `parent.x` one of the model above.
+    fn visit_expressions(session: &mut SessionInfo, node: &Node, from_module: Option<ModuleKey>, scope: &XmlScope, results: &mut Vec<Range<usize>>, target: &ReferenceTarget) {
         let &ReferenceTarget::Symbol(SymbolKey::Variable(target)) = target else { return };
         if !SymbolTable::is_field(session, target.into()) { return }
         let field_class = session.st().get_in_parents(target.into(), &[SymType::CLASS], true);
@@ -100,16 +101,30 @@ impl XmlAstReferenceVisitor {
         let Some(model_name) = session.st()[field_class]._model.as_ref().map(|model| model.name.clone()) else { return };
         let field_name = session.st()[target].name.clone();
         let doc_text = node.document().input_text();
-        for attr in node.attributes().filter(|attr| XmlAstUtils::is_modifier_attribute(attr.name())) {
-            XmlAstUtils::for_each_modifier_field(&attr, doc_text, |name, range, on_parent| {
-                let scope_model = match on_parent {
-                    true => &scope.parent_model,
-                    false => &scope.record_model,
-                };
-                if field_name == name && scope_model.known().is_some_and(|model| model_name == model) {
-                    results.push(range);
-                }
+        let mut paths = vec![];
+        for attr in node.attributes().filter(|attr| XmlAstUtils::is_expression_attribute(attr.name())) {
+            XmlAstUtils::for_each_expression_field(&attr, doc_text, |field| match field {
+                ExprField::OnCurrent(name, range, on_parent) => {
+                    let scope_model = match on_parent {
+                        true => &scope.parent_model,
+                        false => &scope.record_model,
+                    };
+                    if field_name == name && scope_model.known().is_some_and(|model| model_name == model) {
+                        results.push(range);
+                    }
+                },
+                ExprField::OnTarget(path, range) => paths.push((path, range)),
             });
+        }
+        if paths.is_empty() { return }
+        let Some(target_model) = XmlAstUtils::expression_target_model(session, node, scope, from_module, false) else { return };
+        for (path, range) in paths {
+            let path_range = TextRange::new(TextSize::new(range.start as u32 - 1), TextSize::new(range.end as u32));
+            for (symbol, segment) in FeaturesUtils::find_model_fields(session, &target_model, None, &path_range, &path, SegmentPick::All) {
+                if symbol == SymbolKey::Variable(target) {
+                    results.push(usize::from(segment.start())..usize::from(segment.end()));
+                }
+            }
         }
     }
 

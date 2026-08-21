@@ -211,14 +211,14 @@ fn completed_span<'a>(text: &'a str, value: &XmlValue, offset: usize) -> Option<
         let segment = text.get(span.start..offset)?;
         span.start += segment.len() - segment.trim_start_matches([' ', '\t', '!']).len();
     }
-    if let XmlValue::Attribute(attr) = value && XmlAstUtils::is_modifier_attribute(attr.name()) {
+    if let XmlValue::Attribute(attr) = value && XmlAstUtils::is_expression_attribute(attr.name()) {
         span = modifier_identifier(text, attr, offset)?;
     }
     let typed = text.get(span.start..offset)?;
     Some((span, typed))
 }
 
-/// Range of the identifier `offset` sits on in a modifier expression, none inside a string literal.
+/// Range of the identifier `offset` sits on in a python expression, none inside a string literal.
 fn modifier_identifier(text: &str, attr: &Attribute, offset: usize) -> Option<Range<usize>> {
     let value_range = attr.range_value();
     // Entities are decoded, `&quot;` opening a string literal, the decode keeping every offset.
@@ -272,7 +272,7 @@ fn target_at(session: &mut SessionInfo, node: &Node, value: &XmlValue, scope: &X
         ("menuitem", "action") => Some(XmlTarget::XmlId(XmlIdFilter::Action)),
         ("menuitem", "parent") => Some(XmlTarget::XmlId(XmlIdFilter::Menu)),
         ("template", "inherit_id") | (_, "t-call" | "t-inherit") => Some(XmlTarget::Template),
-        (_, name) if XmlAstUtils::is_modifier_attribute(name) => {
+        (_, name) if XmlAstUtils::is_expression_attribute(name) => {
             let doc_text = node.document().input_text();
             let identifier = modifier_identifier(doc_text, attr, offset)?;
             let model = match doc_text[..identifier.start].ends_with("parent.") {

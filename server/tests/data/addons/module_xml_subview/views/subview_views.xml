@@ -49,4 +49,29 @@
             </form>
         </field>
     </record>
+
+    <record id="subview_parent_view_domains" model="ir.ui.view">
+        <field name="name">module_xml_subview.parent.domains</field>
+        <field name="model">module_xml_subview.parent</field>
+        <field name="arch" type="xml">
+            <form string="Parent">
+                <field name="line_ids" domain="[('amount', '=', amount), ('parent_id.tag_id', '!=', False)]">
+                    <list>
+                        <field name="parent_id" domain="[('tag_id', '=', parent.amount)]"/>
+                    </list>
+                </field>
+                <field name="tag_id" domain="[('amount',"/>
+            </form>
+        </field>
+    </record>
+
+    <record id="subview_parent_view_search" model="ir.ui.view">
+        <field name="name">module_xml_subview.parent.search</field>
+        <field name="model">module_xml_subview.parent</field>
+        <field name="arch" type="xml">
+            <search string="Parents">
+                <filter name="tagged" domain="[('tag_id', '!=', False)]"/>
+            </search>
+        </field>
+    </record>
 </odoo>

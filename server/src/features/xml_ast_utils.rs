@@ -10,20 +10,20 @@ use crate::{
             symbol_keys::{ModuleKey, SourceFileKey, SymbolKey, XmlId},
         },
     },
-    features::owl_expr::decode_entities,
+    features::{features_utils::{FeaturesUtils, SegmentPick}, owl_expr::decode_entities},
     threads::SessionInfo,
 };
 use roxmltree::{Attribute, Node};
 use ruff_python_ast::visitor::{Visitor, walk_expr};
-use ruff_python_ast::Expr;
+use ruff_python_ast::{Expr, ExprStringLiteral};
 use ruff_python_parser::parse_parenthesized_expression_range;
-use ruff_text_size::{Ranged, TextLen, TextRange};
+use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 use std::{ops::Range, rc::Rc};
 
 /// Tags making a `<field>`'s content an inline subview, `tree` being pre-18.0 for `list`.
 const SUBVIEW_TAGS: [&str; 6] = ["form", "list", "tree", "graph", "kanban", "calendar"];
 
-/// Names odoo predefines in a modifier, `IGNORED_IN_EXPRESSION` of `tools/view_validation.py`.
+/// Names odoo predefines in an expression, `IGNORED_IN_EXPRESSION` of `tools/view_validation.py`.
 const IGNORED_IN_EXPRESSION: [&str; 22] = [
     "True", "False", "None", "self", "uid", "context", "context_today", "allowed_company_ids",
     "current_company_id", "time", "datetime", "relativedelta", "current_date", "today", "now",
@@ -62,6 +62,14 @@ pub struct XmlScope<'a> {
     /// For an `ir.ui.view` record, the model its arch targets (captured from the
     /// record's `<field name="model">`). Applied to the `<field name="arch">` subtree.
     pub view_target_model: Option<&'a str>,
+}
+
+/// A field name a python attribute holds, and the model it belongs to.
+pub enum ExprField {
+    /// A dotted path of the model the attribute targets.
+    OnTarget(String, Range<usize>),
+    /// A name of the model in scope, `parent.<field>` naming one of the model above.
+    OnCurrent(String, Range<usize>, bool),
 }
 
 /// What an XML location refers to, kept next to the symbols so consumers need not infer it.
@@ -126,8 +134,8 @@ impl XmlAstUtils {
             XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["t-call"], out, on_dep_only);
             // Any element may carry `groups`, a list rather than the single id the others hold.
             XmlAstUtils::emit_group_ids(session, node, offset, from_module, out, on_dep_only);
-            // Any element may carry a modifier, an expression over the fields in scope.
-            XmlAstUtils::emit_modifier_fields(session, node, offset, from_module, scope, out, on_dep_only);
+            // Any element may carry a python expression over the fields in scope.
+            XmlAstUtils::emit_expression_fields(session, node, offset, from_module, scope, out, on_dep_only);
             match node.tag_name().name()  {
                 "record" => {
                     XmlAstUtils::visit_record(session, node, offset, from_module, scope, out, on_dep_only);
@@ -408,31 +416,80 @@ impl XmlAstUtils {
         }
     }
 
-    /// Resolve the fields named by every modifier expression carried by `node`.
-    fn emit_modifier_fields(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, scope: &XmlScope, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+    /// Resolve the fields named by every python expression carried by `node`.
+    fn emit_expression_fields(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, scope: &XmlScope, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
         let doc_text = node.document().input_text();
-        let mut hits: Vec<(String, Range<usize>, bool)> = vec![];
+        let mut hits: Vec<ExprField> = vec![];
         for attr in node.attributes() {
-            if !XmlAstUtils::is_modifier_attribute(attr.name()) || !XmlAstUtils::is_at_offset(&attr.range_value(), offset) {
+            if !XmlAstUtils::is_expression_attribute(attr.name()) || !XmlAstUtils::is_at_offset(&attr.range_value(), offset) {
                 continue;
             }
-            XmlAstUtils::for_each_modifier_field(&attr, doc_text, |name, range, on_parent| {
-                if XmlAstUtils::is_at_offset(&range, offset) {
-                    hits.push((name.to_string(), range, on_parent));
+            XmlAstUtils::for_each_expression_field(&attr, doc_text, |field| {
+                let (ExprField::OnTarget(_, range) | ExprField::OnCurrent(_, range, _)) = &field;
+                if XmlAstUtils::is_at_offset(range, offset) {
+                    hits.push(field);
                 }
             });
         }
-        for (name, range, on_parent) in hits {
-            let model = match on_parent {
-                true => &scope.parent_model,
-                false => &scope.record_model,
-            };
-            let Some(model_name) = model.known() else { continue };
-            let found = XmlAstUtils::resolve_member_on_model(session, model_name, &name, from_module, on_dep_only);
-            if !found.is_empty() {
-                out(XmlRef { kind: XmlRefKind::Member, range, symbols: found });
+        // Only a path needs the target model, and resolving it costs a comodel lookup.
+        let target_model = match hits.iter().any(|hit| matches!(hit, ExprField::OnTarget(..))) {
+            true => XmlAstUtils::expression_target_model(session, node, scope, from_module, on_dep_only),
+            false => None,
+        };
+        for hit in hits {
+            match hit {
+                ExprField::OnCurrent(name, range, on_parent) => {
+                    let model = match on_parent {
+                        true => &scope.parent_model,
+                        false => &scope.record_model,
+                    };
+                    let Some(model_name) = model.known() else { continue };
+                    let found = XmlAstUtils::resolve_member_on_model(session, model_name, &name, from_module, on_dep_only);
+                    if !found.is_empty() {
+                        out(XmlRef { kind: XmlRefKind::Member, range, symbols: found });
+                    }
+                },
+                ExprField::OnTarget(path, range) => {
+                    let Some(target_model) = target_model.clone() else { continue };
+                    XmlAstUtils::emit_path_fields(session, &target_model, &path, range, offset, from_module, out, on_dep_only);
+                },
             }
         }
+    }
+
+    /// Resolve `path`, a dotted field path of `model_name`, as one reference per segment.
+    fn emit_path_fields(session: &mut SessionInfo, model_name: &str, path: &str, range: Range<usize>, offset: Option<usize>, from_module: Option<ModuleKey>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        let pick = match offset {
+            Some(offset) => SegmentPick::Cursor(offset),
+            None => SegmentPick::All,
+        };
+        let from_module = match on_dep_only {
+            true => from_module,
+            false => None,
+        };
+        // `find_model_fields` starts its segments one byte past the range, where the quote sits.
+        let path_range = TextRange::new(TextSize::new(range.start as u32 - 1), TextSize::new(range.end as u32));
+        let mut segments: Vec<(Range<usize>, Vec<SymbolKey>)> = vec![];
+        for (symbol, segment) in FeaturesUtils::find_model_fields(session, model_name, from_module, &path_range, path, pick) {
+            let segment = usize::from(segment.start())..usize::from(segment.end());
+            match segments.last_mut() {
+                Some((last, symbols)) if *last == segment => symbols.push(symbol),
+                _ => segments.push((segment, vec![symbol])),
+            }
+        }
+        for (range, symbols) in segments {
+            out(XmlRef { kind: XmlRefKind::Member, range, symbols });
+        }
+    }
+
+    /// Model a `domain`/`context` on `node` names fields of, the comodel of the field it is set on.
+    pub fn expression_target_model(session: &mut SessionInfo, node: &Node, scope: &XmlScope, from_module: Option<ModuleKey>, on_dep_only: bool) -> Option<Rc<str>> {
+        let model_name = scope.record_model.known()?;
+        // Only a `<field>` retargets, at the comodel it filters, a `<filter>` staying on the view.
+        if node.tag_name().name() != "field" {
+            return Some(Rc::from(model_name));
+        }
+        XmlAstUtils::comodel_name(session, model_name, node.attribute("name")?, from_module, on_dep_only)
     }
 
     fn scan_format_xml_id_refs(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
@@ -498,24 +555,30 @@ impl XmlAstUtils {
         }
     }
 
-    /// Whether `name` is a modifier attribute, holding a python expression over the model's fields.
-    pub fn is_modifier_attribute(name: &str) -> bool {
-        matches!(name, "invisible" | "column_invisible" | "readonly" | "required") || name.starts_with("decoration-")
+    /// Whether `name` holds a python expression over the fields in scope, a modifier or a filter.
+    pub fn is_expression_attribute(name: &str) -> bool {
+        matches!(name, "invisible" | "column_invisible" | "readonly" | "required" | "domain" | "context")
+            || name.starts_with("decoration-")
     }
 
-    /// Each field name of the modifier expression of `attr` with its range, `parent.x` flagged.
-    pub fn for_each_modifier_field(attr: &Attribute, doc_text: &str, mut f: impl FnMut(&str, Range<usize>, bool)) {
+    /// Each field name of the python expression of `attr`, with the model it belongs to.
+    pub fn for_each_expression_field(attr: &Attribute, doc_text: &str, mut f: impl FnMut(ExprField)) {
         let attr_range = attr.range_value();
         let attr_start = attr_range.start;
         // The decode pads what it shortens, so parsing raw `doc_text` keeps offsets file-aligned.
         let expr = decode_entities(&doc_text[attr_range]);
         // A value spread over several lines only parses as if parenthesized, as lxml joins it.
         let Ok(parsed) = parse_parenthesized_expression_range(&expr, TextRange::up_to(expr.text_len())) else { return };
-        let mut visitor = ModifierFieldVisitor { hits: vec![] };
+        let shifted = |range: TextRange| attr_start + usize::from(range.start())..attr_start + usize::from(range.end());
+        if attr.name() == "domain" {
+            for_each_domain_leaf(parsed.expr(), &mut |field| {
+                f(ExprField::OnTarget(field.value.to_str().to_string(), shifted(literal_content(field))));
+            });
+        }
+        let mut visitor = ExpressionValueVisitor { hits: vec![] };
         visitor.visit_expr(parsed.expr());
         for (name, range, on_parent) in visitor.hits {
-            let start = attr_start + usize::from(range.start());
-            f(&name, start..start + usize::from(range.len()), on_parent);
+            f(ExprField::OnCurrent(name, shifted(range), on_parent));
         }
     }
 
@@ -593,12 +656,36 @@ impl XmlAstUtils {
 
 }
 
-/// Collects the fields a modifier expression names, `parent.<field>` belonging to the model above.
-struct ModifierFieldVisitor {
+/// Byte range of a string literal's content, the quotes around it excluded.
+fn literal_content(literal: &ExprStringLiteral) -> TextRange {
+    TextRange::new(literal.start() + TextSize::new(1), literal.end() - TextSize::new(1))
+}
+
+/// Left-hand side of each leaf of `domain`, only a direct item of the domain list being one.
+fn for_each_domain_leaf(domain: &Expr, f: &mut impl FnMut(&ExprStringLiteral)) {
+    let items = match domain {
+        Expr::List(list) => &list.elts,
+        Expr::Tuple(tuple) => &tuple.elts,
+        _ => return,
+    };
+    for item in items {
+        let elements = match item {
+            Expr::List(list) => &list.elts,
+            Expr::Tuple(tuple) => &tuple.elts,
+            _ => continue,
+        };
+        if let [Expr::StringLiteral(field), _, _] = &elements[..] {
+            f(field);
+        }
+    }
+}
+
+/// Collects the names an expression uses as values, `parent.<field>` belonging to the model above.
+struct ExpressionValueVisitor {
     hits: Vec<(String, TextRange, bool)>,
 }
 
-impl Visitor<'_> for ModifierFieldVisitor {
+impl Visitor<'_> for ExpressionValueVisitor {
     fn visit_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Attribute(attribute) if matches!(attribute.value.as_ref(), Expr::Name(name) if name.id.as_str() == "parent") => {
@@ -617,16 +704,33 @@ impl Visitor<'_> for ModifierFieldVisitor {
 mod tests {
     use super::*;
 
-    /// Field names and absolute ranges of the first attribute of `xml`'s root element.
+    /// Value names and absolute ranges of the first attribute of `xml`'s root element.
     fn modifier_fields(xml: &str) -> Vec<(String, Range<usize>, bool)> {
+        expression_fields(xml).into_iter().filter_map(|field| match field {
+            ExprField::OnCurrent(name, range, on_parent) => Some((name, range, on_parent)),
+            ExprField::OnTarget(..) => None,
+        }).collect()
+    }
+
+    /// Every field named by the first attribute of `xml`'s root element, ranges checked.
+    fn expression_fields(xml: &str) -> Vec<ExprField> {
         let doc = roxmltree::Document::parse(xml).unwrap();
         let attr = doc.root_element().attributes().next().unwrap();
         let mut hits = vec![];
-        XmlAstUtils::for_each_modifier_field(&attr, xml, |name, range, on_parent| {
+        XmlAstUtils::for_each_expression_field(&attr, xml, |field| {
+            let (ExprField::OnTarget(name, range) | ExprField::OnCurrent(name, range, _)) = &field;
             assert_eq!(&xml[range.clone()], name, "range does not cover the name it reports");
-            hits.push((name.to_string(), range, on_parent));
+            hits.push(field);
         });
         hits
+    }
+
+    /// Field paths of the target model named by the first attribute of `xml`'s root element.
+    fn target_fields(xml: &str) -> Vec<(String, Range<usize>)> {
+        expression_fields(xml).into_iter().filter_map(|field| match field {
+            ExprField::OnTarget(name, range) => Some((name, range)),
+            ExprField::OnCurrent(..) => None,
+        }).collect()
     }
 
     fn names_of(xml: &str) -> Vec<String> {
@@ -634,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn for_each_modifier_field_yields_field_names_only() {
+    fn for_each_expression_field_yields_field_names_only() {
         assert_eq!(names_of("<page invisible=\"not partner_id or state == 'draft'\"/>"), ["partner_id", "state"]);
         // Predefined names, the members and the keywords of a call, and literals name no field.
         assert_eq!(names_of("<page invisible=\"uid and context.get('hide')\"/>"), Vec::<String>::new());
@@ -645,8 +749,21 @@ mod tests {
         assert_eq!(modifier_fields("<page invisible=\"parent.line_id.x\"/>"), [("line_id".to_string(), 24..31, true)]);
     }
 
+    /// A domain names fields of the model it targets on the left-hand side of each of its leaves.
     #[test]
-    fn for_each_modifier_field_keeps_offsets_and_skips_what_does_not_parse() {
+    fn for_each_expression_field_yields_the_left_hand_side_of_a_domain_leaf() {
+        let names = |xml: &str| target_fields(xml).into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+        assert_eq!(names("<filter domain=\"[('state', '=', 'draft')]\"/>"), ["state"]);
+        assert_eq!(target_fields("<filter domain=\"[('a.b','=',1)]\"/>"), [("a.b".to_string(), 19..22)]);
+        // The operators of a domain, and the values a leaf compares against, name no field.
+        assert_eq!(names("<filter domain=\"['|',('a','=',1),('b','in',['c','d'])]\"/>"), ["a", "b"]);
+        // A leaf compared against a name is a value of the model in scope rather than a path.
+        assert_eq!(names("<filter domain=\"[('a','=',parent_id)]\"/>"), ["a"]);
+        assert_eq!(names_of("<filter domain=\"[('a','=',parent_id)]\"/>"), ["parent_id"]);
+    }
+
+    #[test]
+    fn for_each_expression_field_keeps_offsets_and_skips_what_does_not_parse() {
         // An entity is decoded to keep the expression valid, padded to keep the offsets right.
         assert_eq!(modifier_fields("<page invisible=\"amount &lt; 0\"/>"), [("amount".to_string(), 17..23, false)]);
         // lxml joins the lines of an attribute value, so a broken-up expression is a valid one.

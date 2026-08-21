@@ -41,6 +41,44 @@ fn test_xml_modifier_fields() {
     assert_definitions(&mut session, &views, position, &models, &[]);
 }
 
+/// A domain names fields of the model it targets, and values of the model in scope.
+#[test]
+fn test_xml_domain_fields() {
+    let (mut odoo, config) = setup_server(true);
+    let mut session = create_init_session(&mut odoo, config);
+    let module = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests").join("data").join("addons").join("module_xml_subview");
+    let views = module.join("views").join("subview_views.xml").sanitize();
+    let models = module.join("models").join("subview_models.py").sanitize();
+    let content = std::fs::read_to_string(&views).unwrap();
+
+    // The left-hand side of a leaf is a field of the comodel of the `<field>` carrying the domain.
+    let position = position_after(&content, r#"line_ids" domain="[('amount"#);
+    assert_definitions(&mut session, &views, position, &models, &[17]);
+    // A dotted one walks the comodels, each segment resolving on its own.
+    let position = position_after(&content, r#", ('parent_id"#);
+    assert_definitions(&mut session, &views, position, &models, &[18]);
+    let position = position_after(&content, r#"('parent_id.tag_id"#);
+    assert_definitions(&mut session, &views, position, &models, &[9]);
+
+    // A value is a field of the model in scope, and `parent.` one of the model above.
+    let position = position_after(&content, r#"'=', amount"#);
+    assert_definitions(&mut session, &views, position, &models, &[7]);
+    let position = position_after(&content, r#"'=', parent.amount"#);
+    assert_definitions(&mut session, &views, position, &models, &[7]);
+    // In that subview the comodel of `parent_id` is the model the left-hand side resolves against.
+    let position = position_after(&content, r#"parent_id" domain="[('tag_id"#);
+    assert_definitions(&mut session, &views, position, &models, &[9]);
+
+    // Only a `<field>` retargets, a `<filter>` naming the fields of the view's own model.
+    let position = position_after(&content, r#"tagged" domain="[('tag_id"#);
+    assert_definitions(&mut session, &views, position, &models, &[9]);
+
+    // A domain that does not parse resolves to nothing rather than to a diagnostic.
+    let position = position_after(&content, r#"tag_id" domain="[('amount"#);
+    assert_definitions(&mut session, &views, position, &models, &[]);
+}
+
 fn assert_definitions(session: &mut SessionInfo, path: &str, position: Position, target_path: &str, expected_lines: &[u32]) {
     let params = GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {

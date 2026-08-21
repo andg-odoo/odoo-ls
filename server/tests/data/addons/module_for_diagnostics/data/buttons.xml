@@ -13,4 +13,13 @@
             </form>
         </field>
     </record>
+    <record id="bike_bike_form_view" model="ir.ui.view">
+        <field name="name">bikes.bike.form</field>
+        <field name="model">bikes.bike</field>
+        <field name="arch" type="xml">
+            <form>
+                <field name="wheel_id" domain="[('name', '!=', False)]"/>
+            </form>
+        </field>
+    </record>
 </odoo>
