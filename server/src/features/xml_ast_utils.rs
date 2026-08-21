@@ -10,13 +10,25 @@ use crate::{
             symbol_keys::{ModuleKey, SourceFileKey, SymbolKey, XmlId},
         },
     },
+    features::owl_expr::decode_entities,
     threads::SessionInfo,
 };
 use roxmltree::{Attribute, Node};
+use ruff_python_ast::visitor::{Visitor, walk_expr};
+use ruff_python_ast::Expr;
+use ruff_python_parser::parse_parenthesized_expression_range;
+use ruff_text_size::{Ranged, TextLen, TextRange};
 use std::{ops::Range, rc::Rc};
 
 /// Tags making a `<field>`'s content an inline subview, `tree` being pre-18.0 for `list`.
 const SUBVIEW_TAGS: [&str; 6] = ["form", "list", "tree", "graph", "kanban", "calendar"];
+
+/// Names odoo predefines in a modifier, `IGNORED_IN_EXPRESSION` of `tools/view_validation.py`.
+const IGNORED_IN_EXPRESSION: [&str; 22] = [
+    "True", "False", "None", "self", "uid", "context", "context_today", "allowed_company_ids",
+    "current_company_id", "time", "datetime", "relativedelta", "current_date", "today", "now",
+    "abs", "len", "bool", "float", "str", "unicode", "set",
+];
 
 /// Model a subtree resolves its fields against.
 #[derive(Clone, Default)]
@@ -43,6 +55,8 @@ impl ModelScope {
 pub struct XmlScope<'a> {
     /// Model the surrounding `<record>`/arch subtree resolves fields against.
     pub record_model: ModelScope,
+    /// Model of the view a subview is nested in, what `parent.<field>` resolves against.
+    pub parent_model: ModelScope,
     /// `name` of the enclosing `<field>` (drives `<field name="model">` text).
     pub field_name: Option<&'a str>,
     /// For an `ir.ui.view` record, the model its arch targets (captured from the
@@ -112,6 +126,8 @@ impl XmlAstUtils {
             XmlAstUtils::emit_attribute_xml_ids(session, node, offset, from_module, &["t-call"], out, on_dep_only);
             // Any element may carry `groups`, a list rather than the single id the others hold.
             XmlAstUtils::emit_group_ids(session, node, offset, from_module, out, on_dep_only);
+            // Any element may carry a modifier, an expression over the fields in scope.
+            XmlAstUtils::emit_modifier_fields(session, node, offset, from_module, scope, out, on_dep_only);
             match node.tag_name().name()  {
                 "record" => {
                     XmlAstUtils::visit_record(session, node, offset, from_module, scope, out, on_dep_only);
@@ -240,6 +256,10 @@ impl XmlAstUtils {
         let mut child_scope = scope.clone();
         child_scope.field_name = field_name;
         if let Some(model_scope) = XmlAstUtils::child_model_scope(session, node, scope, from_module, on_dep_only) {
+            // Only a subview nests a model in another, the arch of a view has none above it.
+            if field_name != Some("arch") {
+                child_scope.parent_model = child_scope.record_model.clone();
+            }
             child_scope.record_model = model_scope;
         }
         for child in node.children() {
@@ -267,6 +287,9 @@ impl XmlAstUtils {
                 "field" | "groupby" => {
                     scope.field_name = ancestor.attribute("name");
                     if let Some(model_scope) = XmlAstUtils::child_model_scope(session, &ancestor, &scope, from_module, on_dep_only) {
+                        if scope.field_name != Some("arch") {
+                            scope.parent_model = scope.record_model.clone();
+                        }
                         scope.record_model = model_scope;
                     }
                 },
@@ -385,6 +408,33 @@ impl XmlAstUtils {
         }
     }
 
+    /// Resolve the fields named by every modifier expression carried by `node`.
+    fn emit_modifier_fields(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, scope: &XmlScope, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
+        let doc_text = node.document().input_text();
+        let mut hits: Vec<(String, Range<usize>, bool)> = vec![];
+        for attr in node.attributes() {
+            if !XmlAstUtils::is_modifier_attribute(attr.name()) || !XmlAstUtils::is_at_offset(&attr.range_value(), offset) {
+                continue;
+            }
+            XmlAstUtils::for_each_modifier_field(&attr, doc_text, |name, range, on_parent| {
+                if XmlAstUtils::is_at_offset(&range, offset) {
+                    hits.push((name.to_string(), range, on_parent));
+                }
+            });
+        }
+        for (name, range, on_parent) in hits {
+            let model = match on_parent {
+                true => &scope.parent_model,
+                false => &scope.record_model,
+            };
+            let Some(model_name) = model.known() else { continue };
+            let found = XmlAstUtils::resolve_member_on_model(session, model_name, &name, from_module, on_dep_only);
+            if !found.is_empty() {
+                out(XmlRef { kind: XmlRefKind::Member, range, symbols: found });
+            }
+        }
+    }
+
     fn scan_format_xml_id_refs(session: &mut SessionInfo, node: &Node, offset: Option<usize>, from_module: Option<ModuleKey>, out: &mut dyn FnMut(XmlRef), on_dep_only: bool) {
         let Some(file_module) = from_module else { return };
         let doc_text = node.document().input_text();
@@ -445,6 +495,27 @@ impl XmlAstUtils {
                 f(group, start..start + group.len());
             }
             segment_start += segment.len() + 1;
+        }
+    }
+
+    /// Whether `name` is a modifier attribute, holding a python expression over the model's fields.
+    pub fn is_modifier_attribute(name: &str) -> bool {
+        matches!(name, "invisible" | "column_invisible" | "readonly" | "required") || name.starts_with("decoration-")
+    }
+
+    /// Each field name of the modifier expression of `attr` with its range, `parent.x` flagged.
+    pub fn for_each_modifier_field(attr: &Attribute, doc_text: &str, mut f: impl FnMut(&str, Range<usize>, bool)) {
+        let attr_range = attr.range_value();
+        let attr_start = attr_range.start;
+        // The decode pads what it shortens, so parsing raw `doc_text` keeps offsets file-aligned.
+        let expr = decode_entities(&doc_text[attr_range]);
+        // A value spread over several lines only parses as if parenthesized, as lxml joins it.
+        let Ok(parsed) = parse_parenthesized_expression_range(&expr, TextRange::up_to(expr.text_len())) else { return };
+        let mut visitor = ModifierFieldVisitor { hits: vec![] };
+        visitor.visit_expr(parsed.expr());
+        for (name, range, on_parent) in visitor.hits {
+            let start = attr_start + usize::from(range.start());
+            f(&name, start..start + usize::from(range.len()), on_parent);
         }
     }
 
@@ -522,9 +593,67 @@ impl XmlAstUtils {
 
 }
 
+/// Collects the fields a modifier expression names, `parent.<field>` belonging to the model above.
+struct ModifierFieldVisitor {
+    hits: Vec<(String, TextRange, bool)>,
+}
+
+impl Visitor<'_> for ModifierFieldVisitor {
+    fn visit_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Attribute(attribute) if matches!(attribute.value.as_ref(), Expr::Name(name) if name.id.as_str() == "parent") => {
+                self.hits.push((attribute.attr.to_string(), attribute.attr.range(), true));
+            },
+            Expr::Name(name) if !IGNORED_IN_EXPRESSION.contains(&name.id.as_str()) => {
+                self.hits.push((name.id.to_string(), name.range(), false));
+            },
+            // Any other attribute has only its value walked, `context.get` naming no field.
+            _ => walk_expr(self, expr),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Field names and absolute ranges of the first attribute of `xml`'s root element.
+    fn modifier_fields(xml: &str) -> Vec<(String, Range<usize>, bool)> {
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let attr = doc.root_element().attributes().next().unwrap();
+        let mut hits = vec![];
+        XmlAstUtils::for_each_modifier_field(&attr, xml, |name, range, on_parent| {
+            assert_eq!(&xml[range.clone()], name, "range does not cover the name it reports");
+            hits.push((name.to_string(), range, on_parent));
+        });
+        hits
+    }
+
+    fn names_of(xml: &str) -> Vec<String> {
+        modifier_fields(xml).into_iter().map(|(name, _, _)| name).collect()
+    }
+
+    #[test]
+    fn for_each_modifier_field_yields_field_names_only() {
+        assert_eq!(names_of("<page invisible=\"not partner_id or state == 'draft'\"/>"), ["partner_id", "state"]);
+        // Predefined names, the members and the keywords of a call, and literals name no field.
+        assert_eq!(names_of("<page invisible=\"uid and context.get('hide')\"/>"), Vec::<String>::new());
+        assert_eq!(names_of("<page invisible=\"len(line_ids) &gt; 0\"/>"), ["line_ids"]);
+        assert_eq!(names_of("<page invisible=\"bool(context_today(self, tz='UTC'))\"/>"), Vec::<String>::new());
+        // `parent.x` belongs to the model above, and a dotted tail is traversal on the first.
+        assert_eq!(modifier_fields("<page invisible=\"parent.state\"/>"), [("state".to_string(), 24..29, true)]);
+        assert_eq!(modifier_fields("<page invisible=\"parent.line_id.x\"/>"), [("line_id".to_string(), 24..31, true)]);
+    }
+
+    #[test]
+    fn for_each_modifier_field_keeps_offsets_and_skips_what_does_not_parse() {
+        // An entity is decoded to keep the expression valid, padded to keep the offsets right.
+        assert_eq!(modifier_fields("<page invisible=\"amount &lt; 0\"/>"), [("amount".to_string(), 17..23, false)]);
+        // lxml joins the lines of an attribute value, so a broken-up expression is a valid one.
+        assert_eq!(names_of("<page invisible=\"state == 'draft'\n    and amount\"/>"), ["state", "amount"]);
+        assert!(names_of("<page invisible=\"amount ===\"/>").is_empty());
+        assert!(names_of("<page invisible=\"\"/>").is_empty());
+    }
 
     /// Entity + multi-byte char before a `%(...)d` ref used to land mid-character.
     #[test]

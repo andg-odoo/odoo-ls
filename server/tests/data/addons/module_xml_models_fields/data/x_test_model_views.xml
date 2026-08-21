@@ -17,7 +17,7 @@
         <field name="arch" type="xml">
             <form string="Test Model Form">
                 <sheet>
-                    <group>
+                    <group invisible="not x_name">
                         <field name="x_name"/>
                     </group>
                 </sheet>

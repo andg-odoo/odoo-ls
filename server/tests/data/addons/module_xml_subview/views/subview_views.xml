@@ -31,4 +31,22 @@
             </list>
         </field>
     </record>
+
+    <record id="subview_parent_view_modifiers" model="ir.ui.view">
+        <field name="name">module_xml_subview.parent.modifiers</field>
+        <field name="model">module_xml_subview.parent</field>
+        <field name="arch" type="xml">
+            <form string="Parent">
+                <group invisible="not tag_id or uid">
+                    <field name="line_ids" readonly="amount &lt; 0">
+                        <list>
+                            <field name="amount" column_invisible="parent.amount"/>
+                            <field name="parent_id" decoration-danger="amount == 0"/>
+                        </list>
+                    </field>
+                    <field name="amount" invisible="tag_id =="/>
+                </group>
+            </form>
+        </field>
+    </record>
 </odoo>

@@ -80,7 +80,7 @@ fn is_operator_byte(byte: u8) -> bool {
 ///
 /// Padding trails the whole *operator cluster* an entity belongs to, never lands inside it:
 /// `&amp;&amp;` decodes to `&&` and `&lt;=` to `<=`, not to `&    &` and `<   =`.
-fn decode_entities(expr: &str) -> String {
+pub(super) fn decode_entities(expr: &str) -> String {
     let mut out = String::with_capacity(expr.len());
     let mut i = 0;
     while i < expr.len() {

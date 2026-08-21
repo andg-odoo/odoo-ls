@@ -70,6 +70,9 @@ fn test_xml_semantic_tokens() {
     // Fields of the record model, and of the model the arch targets.
     assert_token(&tokens, "res_model", PROPERTY, NO_MODIFIER);
     assert_token(&tokens, "x_name", PROPERTY, NO_MODIFIER);
+    // A field named by a modifier expression colours like the `<field name=…>` ones.
+    let named = tokens.iter().filter(|(text, ..)| text == "x_name").count();
+    assert_eq!(named, 3, "expected the modifier expression to carry a token too, got: {tokens:?}");
     // Text content is only resolved where it names a model: the view name is not one.
     assert!(
         !tokens.iter().any(|(text, _, _)| text == "x_test_model.tree"),
