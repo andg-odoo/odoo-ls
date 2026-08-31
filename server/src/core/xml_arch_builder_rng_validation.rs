@@ -504,11 +504,12 @@ impl XmlArchBuilder {
         true
     }
 
-    fn collect_t_name(node: &Node) -> Option<(OYarn, TextRange)> {
-        let t_name_attr = node.attribute_node("t-name")?;
-        let r = t_name_attr.range_value();
+    /// (value, value_range) of `attribute` on `node`, the range excluding the quotes.
+    fn collect_attribute_value(node: &Node, attribute: &str) -> Option<(OYarn, TextRange)> {
+        let attr = node.attribute_node(attribute)?;
+        let r = attr.range_value();
         Some((
-            oyarn!("{}", t_name_attr.value()),
+            oyarn!("{}", attr.value()),
             TextRange::new(TextSize::new(r.start as u32), TextSize::new(r.end as u32)),
         ))
     }
@@ -528,18 +529,8 @@ impl XmlArchBuilder {
         result
     }
 
-    /// (value, value_range) of `attribute` on `node`, the range excluding the quotes.
-    fn collect_inherit_attribute(node: &Node, attribute: &str) -> Option<(OYarn, TextRange)> {
-        let inherit_attr = node.attribute_node(attribute)?;
-        let r = inherit_attr.range_value();
-        Some((
-            oyarn!("{}", inherit_attr.value()),
-            TextRange::new(TextSize::new(r.start as u32), TextSize::new(r.end as u32)),
-        ))
-    }
-
     fn load_qweb_template(&mut self, session: &mut SessionInfo, node: &Node, found_id: Option<String>, for_web: bool, diagnostics: &mut Vec<Diagnostic>) -> bool {
-        let found_t_name = Self::collect_t_name(node);
+        let found_t_name = Self::collect_attribute_value(node, "t-name");
         let found_inherit = node.attribute("t-inherit").is_some();
         if found_id.is_none() && found_t_name.is_none() && !found_inherit {
             return false;
@@ -556,10 +547,10 @@ impl XmlArchBuilder {
             session.st_mut()[data].t_calls = t_calls;
         }
         // Record the `t-inherit` target — powers find-references of a template name.
-        if let Some(t_inherit) = Self::collect_inherit_attribute(node, "t-inherit") {
+        if let Some(t_inherit) = Self::collect_attribute_value(node, "t-inherit") {
             session.st_mut()[data].t_inherit = Some(t_inherit);
         }
-        if let Some(inherit_id) = Self::collect_inherit_attribute(node, "inherit_id") {
+        if let Some(inherit_id) = Self::collect_attribute_value(node, "inherit_id") {
             session.st_mut()[data].inherit_id = Some(inherit_id);
         }
         if let Some((t_name, range)) = &found_t_name

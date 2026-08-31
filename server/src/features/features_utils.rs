@@ -1004,10 +1004,10 @@ impl FeaturesUtils {
                 let template = &st[key];
                 let title = match template.xml_id.as_ref() {
                     Some(local_id) => Self::full_xml_id(st, symbol, local_id),
-                    None => template.t_name.as_ref()?.to_string(),
+                    None => template.t_name.as_ref()?.0.to_string(),
                 };
                 let mut details = vec![];
-                if let Some(t_name) = template.t_name.as_ref() {
+                if let Some((t_name, _)) = template.t_name.as_ref() {
                     details.push(format!("t-name: {t_name}"));
                 }
                 if let Some((inherited, _)) = template.inherit_id.as_ref().or(template.t_inherit.as_ref()) {

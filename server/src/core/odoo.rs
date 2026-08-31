@@ -1697,8 +1697,7 @@ impl Odoo {
             if !file_info.borrow().file_info_ast.borrow().ast.is_built() {
                 file_info.borrow_mut().prepare_ast(session);
             }
-            let ast_type = file_info.borrow().file_info_ast.borrow().ast.clone();
-            if matches!(ast_type, Ast::PythonAst(_)) {
+            if file_info.borrow().file_info_ast.borrow().ast.kind() == AstKind::PythonAst {
                 let Position { line, character } = params.text_document_position_params.position;
                 return Ok(SignatureHelpFeature::signature_help_python(session, file_symbol, &file_info, line, character));
             }

@@ -481,7 +481,7 @@ pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
                         },
                         SignatureHelpRequest::METHOD => {
                             let mut session = create_session!(sender_to_s, receiver_to_s, Some(generic_sender_to_main.clone()), sync_odoo, delayed_process_sender);
-                            SyncOdoo::process_rebuilds(&mut session, true);
+                            BuildScheduler::process_rebuilds(&mut session, true);
                             to_value::<SignatureHelp>(Odoo::handle_signature_help(&mut session, serde_json::from_value(r.params).unwrap()))
                         },
                         SemanticTokensFullRequest::METHOD => {
