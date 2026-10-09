@@ -1,5 +1,7 @@
 use crate::{
+    constants::OYarn,
     core::{
+        evaluation_utils::DeepFieldEvalWalker,
         model::Model,
         odoo::SyncOdoo,
         symbols::{
@@ -8,18 +10,17 @@ use crate::{
             symbol_keys::{ModuleKey, SourceFileKey, SymbolKey, XmlId},
         },
     },
+    oyarn,
     threads::SessionInfo,
 };
 use roxmltree::{Attribute, Node};
 use std::ops::Range;
 
-/// Inherited state threaded top-down through the XML walk (replacing a
-/// string-keyed context map). Both fields borrow the parsed document, so the
-/// scope is `Copy` and each visitor just hands a tweaked copy to its children.
-#[derive(Clone, Copy, Default)]
+/// Inherited state threaded top-down through the XML walk, handed to children as a tweaked clone.
+#[derive(Clone, Default)]
 pub struct XmlScope<'a> {
-    /// Model the surrounding `<record>`/arch subtree resolves fields against.
-    pub record_model: Option<&'a str>,
+    /// Model the surrounding `<record>`/arch/subview subtree resolves fields against.
+    pub record_model: Option<OYarn>,
     /// `name` of the enclosing `<field>` (drives `<field name="model">` text).
     pub field_name: Option<&'a str>,
     /// For an `ir.ui.view` record, the model its arch targets (captured from the
@@ -50,7 +51,7 @@ impl XmlAstUtils {
                 "record" => {
                     XmlAstUtils::visit_record(session, node, offset, from_module, scope, results, on_dep_only);
                 }
-                "field" => {
+                "field" | "groupby" => {
                     XmlAstUtils::visit_field(session, node, offset, from_module, scope, results, on_dep_only);
                 },
                 "menuitem" => {
@@ -64,7 +65,7 @@ impl XmlAstUtils {
                 }
                 _ => {
                     for child in node.children() {
-                        XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+                        XmlAstUtils::visit_node(session, &child, offset, from_module, scope.clone(), results, on_dep_only);
                     }
                 }
             }
@@ -80,7 +81,7 @@ impl XmlAstUtils {
         let attr_at_offset = node.attributes().find(|attr| attr.range_value().start <= offset && attr.range_value().end >= offset);
         if let Some(attr) = attr_at_offset {
             if attr.name() == "name" && !is_action_type
-                && let Some(model_name) = scope.record_model.filter(|m| !m.is_empty())
+                && let Some(model_name) = scope.record_model.as_deref().filter(|m| !m.is_empty())
             {
                 let found = XmlAstUtils::resolve_member_on_model(session, model_name, attr.value(), from_module, on_dep_only);
                 if !found.is_empty() {
@@ -95,7 +96,7 @@ impl XmlAstUtils {
             }
         }
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope.clone(), results, on_dep_only);
         }
     }
 
@@ -124,7 +125,7 @@ impl XmlAstUtils {
     fn visit_record<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, mut scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
         for attr in node.attributes() {
             if attr.name() == "model" {
-                scope.record_model = Some(attr.value());
+                scope.record_model = Some(oyarn!("{}", attr.value()));
                 if attr.range_value().start <= offset && attr.range_value().end >= offset
                     && let Some(model) = session.sync_odoo.models.get(attr.value()).cloned()
                 {
@@ -144,21 +145,21 @@ impl XmlAstUtils {
                 results.1 = Some(attr.range_value());
             }
         }
-        if scope.record_model == Some("ir.ui.view") {
+        if scope.record_model.as_deref() == Some("ir.ui.view") {
             scope.view_target_model = XmlAstUtils::view_target_model(node);
         }
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope.clone(), results, on_dep_only);
         }
     }
 
     fn visit_field<'a>(session: &mut SessionInfo<'_>, node: &Node<'a, '_>, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope<'a>, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
-        let mut child_scope = scope;
+        let mut child_scope = scope.clone();
         for attr in node.attributes() {
             if attr.name() == "name" {
                 child_scope.field_name = Some(attr.value());
                 if attr.range_value().start <= offset && attr.range_value().end >= offset
-                    && let Some(model_name) = scope.record_model.filter(|m| !m.is_empty())
+                    && let Some(model_name) = scope.record_model.as_deref().filter(|m| !m.is_empty())
                 {
                     let found = XmlAstUtils::resolve_member_on_model(session, model_name, attr.value(), from_module, on_dep_only);
                     if !found.is_empty() {
@@ -172,23 +173,41 @@ impl XmlAstUtils {
                     results.1 = Some(attr.range_value());
                 }
         }
-        // Inside a view's `<field name="arch">`, sub-elements resolve against the
-        // view's target model (captured at the ir.ui.view record), not the
-        // surrounding ir.ui.view itself.
-        if node.attribute("name") == Some("arch")
-            && let Some(target) = scope.view_target_model
-        {
-            child_scope.record_model = Some(target);
-        }
+        child_scope.record_model = XmlAstUtils::child_record_model(session, node, &scope, from_module, on_dep_only);
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, child_scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, child_scope.clone(), results, on_dep_only);
+        }
+    }
+
+    /// Model the children of a `<field>` or `<groupby>` resolve against, following Odoo's view rules.
+    pub fn child_record_model(session: &mut SessionInfo, node: &Node, scope: &XmlScope, from_module: Option<ModuleKey>, on_dep_only: bool) -> Option<OYarn> {
+        let Some(field_name) = node.attribute("name") else { return scope.record_model.clone() };
+        if node.tag_name().name() == "field" {
+            if field_name == "arch" && let Some(target) = scope.view_target_model {
+                return Some(oyarn!("{}", target));
+            }
+            if !node.children().any(|child| child.is_element()
+                && matches!(child.tag_name().name(), "form" | "list" | "tree" | "graph" | "kanban" | "calendar"))
+            {
+                return scope.record_model.clone();
+            }
+        }
+        let model = session.sync_odoo.models.get(scope.record_model.as_deref()?).cloned()?;
+        let from_module = if on_dep_only { from_module } else { None };
+        let main_symbol = model.borrow().get_main_symbols(session, from_module).next()?;
+        let mut deep_field_walker = DeepFieldEvalWalker::new(main_symbol.into(), from_module);
+        deep_field_walker.get_model_fields(session, main_symbol.into(), field_name);
+        match deep_field_walker.get_model_symbol(session)? {
+            SymbolKey::Class(class_key) => session.st()[class_key]._model.as_ref().map(|model| model.name.clone()),
+            SymbolKey::XmlRecord(xml_record_key) => session.st().get_declared_model(xml_record_key).cloned(),
+            _ => None,
         }
     }
 
     fn visit_text(session: &mut SessionInfo, node: &Node, offset: usize, from_module: Option<ModuleKey>, scope: XmlScope, results: &mut (Vec<SymbolKey>, Option<Range<usize>>), on_dep_only: bool) {
         if node.range().start <= offset && node.range().end >= offset {
             let (Some(_model), Some(field)) = (
-                scope.record_model.filter(|m| !m.is_empty()),
+                scope.record_model.as_deref().filter(|m| !m.is_empty()),
                 scope.field_name.filter(|f| !f.is_empty()),
             ) else {
                 return;
@@ -208,7 +227,7 @@ impl XmlAstUtils {
             results.1 = Some(attr.range_value());
         }
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope.clone(), results, on_dep_only);
         }
     }
 
@@ -221,7 +240,7 @@ impl XmlAstUtils {
             results.1 = Some(attr.range_value());
         }
         for child in node.children() {
-            XmlAstUtils::visit_node(session, &child, offset, from_module, scope, results, on_dep_only);
+            XmlAstUtils::visit_node(session, &child, offset, from_module, scope.clone(), results, on_dep_only);
         }
     }
 

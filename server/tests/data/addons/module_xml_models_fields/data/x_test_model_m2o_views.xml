@@ -6,6 +6,9 @@
         <field name="arch" type="xml">
             <list string="Test Model List">
                 <field name="x_name"/>
+                <groupby name="x_other_model">
+                    <field name="x_name"/>
+                </groupby>
             </list>
         </field>
     </record>
@@ -19,7 +22,16 @@
                 <sheet>
                     <group>
                         <field name="x_name"/>
-                        <field name="x_other_model"/>
+                        <field name="x_other_model">
+                            <form>
+                                <field name="x_name"/>
+                            </form>
+                        </field>
+                        <field name="x_name">
+                            <form>
+                                <field name="x_name"/>
+                            </form>
+                        </field>
                     </group>
                 </sheet>
             </form>

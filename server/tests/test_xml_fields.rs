@@ -15,6 +15,7 @@ enum TestDataFiles {
     XTestModelCsv,
     XTestModelM2oXml,
     XTestModelM2oCsv,
+    XTestModelM2oViews,
     PyTestModel,
 }
 
@@ -28,6 +29,7 @@ fn get_test_data_file_paths() -> HashMap<TestDataFiles, String> {
     map.insert(TestDataFiles::XTestModelCsv, test_addons_path.join("module_xml_models_fields/data/x_test_model.csv").to_string_lossy().to_string());
     map.insert(TestDataFiles::XTestModelM2oXml, test_addons_path.join("module_xml_models_fields/data/x_test_model_m2o.xml").to_string_lossy().to_string());
     map.insert(TestDataFiles::XTestModelM2oCsv, test_addons_path.join("module_xml_models_fields/data/x_test_model_m2o.csv").to_string_lossy().to_string());
+    map.insert(TestDataFiles::XTestModelM2oViews, test_addons_path.join("module_xml_models_fields/data/x_test_model_m2o_views.xml").to_string_lossy().to_string());
     map.insert(TestDataFiles::PyTestModel, test_addons_path.join("module_xml_models_fields/models/py_test_model.py").to_string_lossy().to_string());
     map
 }
@@ -401,4 +403,31 @@ fn test_xml_fields_def_hover_completion() {
         "Domain completion should still include the delegation field parent_id; got: {:?}",
         inherits_field_labels
     );
+}
+
+#[test]
+fn test_xml_subview_fields_resolve_on_comodel() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let file_paths = get_test_data_file_paths();
+    let x_test_model_xml = Path::new(&file_paths[&TestDataFiles::XTestModelXml]).sanitize_cow();
+    let x_test_model_m2o_xml = Path::new(&file_paths[&TestDataFiles::XTestModelM2oXml]).sanitize_cow();
+    let views_path = Path::new(&file_paths[&TestDataFiles::XTestModelM2oViews]);
+    let views_info = session.sync_odoo.get_file_mgr().borrow().get_file_info(&views_path.sanitize_cow()).unwrap();
+    let Some(views_symbol) = SyncOdoo::get_symbol_of_opened_file(&mut session, views_path) else {
+        panic!("Failed to get symbol for {}", views_path.display());
+    };
+    let mut def_files = |line, character| test_utils::get_definition_locs(&mut session, views_symbol, &views_info, line, character)
+        .iter()
+        .map(|loc| loc.target_uri.to_file_path().unwrap().sanitize())
+        .collect::<Vec<_>>();
+
+    // x_name is x_test_model_m2o's field, but x_test_model's inside the x_other_model subview
+    assert_eq!(def_files(23, 38), vec![x_test_model_m2o_xml.to_string()]);
+    assert_eq!(def_files(26, 46), vec![x_test_model_xml.to_string()]);
+    // A subview under the non relational x_name resolves nothing rather than the parent model's field
+    assert_eq!(def_files(31, 46), Vec::<String>::new());
+    // <groupby> switches to the comodel like a subview does
+    assert_eq!(def_files(7, 30), vec![x_test_model_m2o_xml.to_string()]);
+    assert_eq!(def_files(9, 34), vec![x_test_model_xml.to_string()]);
 }
