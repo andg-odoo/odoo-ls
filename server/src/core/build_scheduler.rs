@@ -1,4 +1,4 @@
-use std::{cell::RefCell, path::Path, rc::Rc, sync::atomic::Ordering};
+use std::{cell::RefCell, path::Path, rc::Rc, sync::atomic::Ordering, time::Instant};
 
 use lsp_types::MessageType;
 use tracing::{error, info, trace};
@@ -182,6 +182,8 @@ impl BuildScheduler {
         session.sync_odoo.import_cache = Some(ImportCache::default());
         let mut already_arch_rebuilt: HashSet<Tree> = HashSet::default();
         let mut already_arch_eval_rebuilt: HashSet<Tree> = HashSet::default();
+        // Files processed per step (arch, arch eval, validation), for the timing log
+        let (start, mut done) = (Instant::now(), [0usize; 3]);
 
         //workdone progress
         let mut reporter = (!bs!(session).rebuild_arch.is_empty() || !bs!(session).rebuild_arch_eval.is_empty() || !bs!(session).rebuild_validation.is_empty())
@@ -213,6 +215,7 @@ impl BuildScheduler {
                     continue;
                 }
                 already_arch_rebuilt.insert(tree);
+                done[0] += 1;
                 if let Some(python_buildable) = sym_key.as_python_buildable()
                 && let Some(mut builder) = PythonArchBuilder::new(session.st(), entry, python_buildable) {
                     builder.load_arch(session);
@@ -230,6 +233,7 @@ impl BuildScheduler {
                     continue;
                 }
                 already_arch_eval_rebuilt.insert(tree);
+                done[1] += 1;
                 if let Some(python_buildable) = sym_key.as_python_buildable()
                 && let Some(mut builder) = PythonArchEval::new(session.st(), entry, python_buildable) {
                     builder.eval_arch(session);
@@ -247,6 +251,7 @@ impl BuildScheduler {
             && session.sync_odoo.interrupt_rebuild.load(Ordering::SeqCst) {
                 session.sync_odoo.interrupt_rebuild.store(false, Ordering::SeqCst);
                 session.log_message(MessageType::INFO, S!("Rebuild interrupted"));
+                info!("rebuild timing: interrupted, arch={} arch_eval={} validation={} took={:?}", done[0], done[1], done[2], start.elapsed());
                 return true;
             }
             let sym = BuildScheduler::pop_item(session, BuildSteps::VALIDATION);
@@ -255,6 +260,7 @@ impl BuildScheduler {
                     trace!("PROCESSING FROM VALIDATION - {}", session.st().debug_path(sym_key.into()));
                 }
                 let (_, entry) = session.st().get_tree_and_entry(sym_key.into());
+                done[2] += 1;
                 Self::validate(session, sym_key.into(), entry);
                 continue;
             }
@@ -266,6 +272,9 @@ impl BuildScheduler {
         }
         session.sync_odoo.import_cache = None;
         session.sync_odoo.watched_file_updates = 0;
+        if done.iter().any(|count| *count > 0) {
+            info!("rebuild timing: arch={} arch_eval={} validation={} took={:?}", done[0], done[1], done[2], start.elapsed());
+        }
         if let Some(reporter) = &mut reporter {
             reporter.end();
         }

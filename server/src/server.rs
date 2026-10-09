@@ -1,4 +1,4 @@
-use std::{io::Error, panic, sync::{Arc, Mutex, atomic::AtomicBool}, thread::JoinHandle};
+use std::{io::Error, panic, sync::{Arc, Mutex, atomic::AtomicBool}, thread::JoinHandle, time::Instant};
 
 use crossbeam_channel::{Receiver, Select, Sender};
 use lsp_server::{Connection, IoThreads, Message, ProtocolError, RequestId, ResponseError};
@@ -283,8 +283,8 @@ impl Server {
             })
         }));
         info!("End of connection initalization.");
-        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Notification(lsp_server::Notification { method: S!("custom/server/register_capabilities"), params: serde_json::Value::Null }))).unwrap();
-        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Notification(lsp_server::Notification { method: S!("custom/server/init"), params: serde_json::Value::Null }))).unwrap();
+        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Notification(lsp_server::Notification { method: S!("custom/server/register_capabilities"), params: serde_json::Value::Null }), Instant::now())).unwrap();
+        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Notification(lsp_server::Notification { method: S!("custom/server/init"), params: serde_json::Value::Null }), Instant::now())).unwrap();
         Ok(())
     }
 
@@ -295,7 +295,7 @@ impl Server {
             params: serde_json::Value::Null,
         });
         // Threads may already be dead during shutdown, so ignore send errors
-        let _ = self.generic_sender_to_main.send(ThreadMessage::LSPMessage(shutdown_notification.clone()));
+        let _ = self.generic_sender_to_main.send(ThreadMessage::LSPMessage(shutdown_notification.clone(), Instant::now()));
         let _ = self.response_sender_to_main.send(shutdown_notification.clone());
         info!(message);
     }
@@ -443,7 +443,7 @@ impl Server {
                         if DEBUG_THREADS {
                             info!("Sending request to main thread : {} - {}", r.method, r.id);
                         }
-                        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Request(r))).unwrap();
+                        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Request(r), Instant::now())).unwrap();
                     },
                     _ => {panic!("Not handled Request Id: {}", r.method)}
                 }
@@ -463,7 +463,7 @@ impl Server {
                             info!("Sending notification to main thread : {}", n.method);
                         }
                         self.interrupt_rebuild_boolean.store(true, std::sync::atomic::Ordering::SeqCst);
-                        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Notification(n))).unwrap();
+                        self.generic_sender_to_main.send(ThreadMessage::LSPMessage(Message::Notification(n), Instant::now())).unwrap();
                     }
                     method if method.starts_with("$/") => warn!("Not handled message id: {}", n.method),
                     method => error!("Not handled Notification Id: {}", method),

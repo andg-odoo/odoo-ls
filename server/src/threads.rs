@@ -257,7 +257,8 @@ pub struct TsServerDiagnostics {
 }
 
 pub enum ThreadMessage {
-    LSPMessage(Message),
+    // The instant is when the server thread forwarded the message, to measure the queue wait
+    LSPMessage(Message, Instant),
     TsServerDiagnostics(TsServerDiagnostics),
 }
 
@@ -384,6 +385,16 @@ pub fn delayed_changes_process_thread(sender_session: Sender<Message>, receiver_
     }
 }
 
+/// Path and 1-based position of a text document message, for the timing log.
+fn lsp_message_target(params: &Value) -> String {
+    let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+    let name = uri.strip_prefix("file://").unwrap_or(uri);
+    match (params["position"]["line"].as_u64(), params["position"]["character"].as_u64()) {
+        (Some(line), Some(character)) => format!("{name}:{}:{}", line + 1, character + 1),
+        _ => name.to_string(),
+    }
+}
+
 pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
     generic_receiver_to_main: Receiver<ThreadMessage>,
     generic_sender_to_main: Sender<ThreadMessage>,
@@ -400,7 +411,7 @@ pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
             match maybe_msg {
                 Ok(msg) => {
                     // Check for shutdown
-                    if matches!(&msg, ThreadMessage::LSPMessage(Message::Notification(n)) if n.method.as_str() == Shutdown::METHOD) {
+                    if matches!(&msg, ThreadMessage::LSPMessage(Message::Notification(n), _) if n.method.as_str() == Shutdown::METHOD) {
                         warn!("Main thread - got shutdown.");
                         return;
                     }
@@ -418,7 +429,7 @@ pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
             match generic_receiver_to_main.recv() {
                 Ok(msg) => {
                     // Check for shutdown
-                    if matches!(&msg, ThreadMessage::LSPMessage(Message::Notification(n)) if n.method.as_str() == Shutdown::METHOD) {
+                    if matches!(&msg, ThreadMessage::LSPMessage(Message::Notification(n), _) if n.method.as_str() == Shutdown::METHOD) {
                         warn!("Main thread - got shutdown.");
                         return;
                     }
@@ -433,7 +444,8 @@ pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
         // Process buffered messages
         if let Some(msg) = buffer.pop_front() {
             match msg {
-                ThreadMessage::LSPMessage(Message::Request(r)) => {
+                ThreadMessage::LSPMessage(Message::Request(r), sent_at) => {
+                    let (start, target) = (Instant::now(), lsp_message_target(&r.params));
                     sync_odoo.lock().unwrap().current_request_id = Some(r.id.clone());
                     let (value, error) = match r.method.as_str() {
                         HoverRequest::METHOD => {
@@ -497,9 +509,11 @@ pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
                     };
                     sync_odoo.lock().unwrap().current_request_id = None;
                     running_request_ids.lock().unwrap().retain(|id| id != &r.id);
+                    info!("lsp timing: {} id={} {} queue={:?} handle={:?}", r.method, r.id, target, start - sent_at, start.elapsed());
                     sender_to_s.send(Message::Response(Response { id: r.id, result: value, error })).unwrap();
                 },
-                ThreadMessage::LSPMessage(Message::Notification(n)) => {
+                ThreadMessage::LSPMessage(Message::Notification(n), sent_at) => {
+                    let (start, target) = (Instant::now(), lsp_message_target(&n.params));
                     match n.method.as_str() {
                         DidOpenTextDocument::METHOD => {
                             let mut session = create_session!(sender_to_s, receiver_to_s, Some(generic_sender_to_main.clone()), sync_odoo, delayed_process_sender);
@@ -558,8 +572,9 @@ pub fn message_processor_thread_main(sync_odoo: Arc<Mutex<SyncOdoo>>,
                         Shutdown::METHOD => { warn!("Main thread - got shutdown."); return;} // should be already caught
                         _ => {error!("Notification not handled by main thread: {}", n.method)}
                     }
+                    info!("lsp timing: {} {} queue={:?} handle={:?}", n.method, target, start - sent_at, start.elapsed());
                 },
-                ThreadMessage::LSPMessage(Message::Response(_)) => {
+                ThreadMessage::LSPMessage(Message::Response(_), _) => {
                     error!("Error: Responses should not arrives in generic channel. Exiting thread");
                     return;
                 }
