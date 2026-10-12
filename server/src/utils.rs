@@ -247,12 +247,17 @@ pub fn is_python_path(path: &str) -> bool {
 }
 
 pub fn string_fuzzy_contains(string: &str, pattern: &str) -> bool {
+    string_fuzzy_contains_parts(&[string], pattern)
+}
+
+/// Same as `string_fuzzy_contains` on the concatenation of `parts`, without building it.
+pub fn string_fuzzy_contains_parts(parts: &[&str], pattern: &str) -> bool {
     let mut pattern_char_iter = pattern.chars();
     let mut pattern_char = match pattern_char_iter.next() {
         Some(c) => c.to_ascii_lowercase(),
         None => return true,
     };
-    for char in string.chars() {
+    for char in parts.iter().flat_map(|part| part.chars()) {
         if char.to_ascii_lowercase() == pattern_char {
             pattern_char = match pattern_char_iter.next() {
                 Some(c) => c.to_ascii_lowercase(),

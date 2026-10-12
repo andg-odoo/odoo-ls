@@ -32,3 +32,15 @@ fn test_workspace_symbol_no_duplicates_for_entry_points_sharing_root() {
         matches.len(), matches
     );
 }
+
+#[test]
+fn test_workspace_symbol_results_are_capped() {
+    let (mut odoo, config) = setup::setup::setup_server(true);
+    let mut session = setup::setup::create_init_session(&mut odoo, config);
+    let response = WorkspaceSymbolFeature::get_workspace_symbols(&mut session, String::new())
+        .expect("workspace/symbol request should not error");
+    let Some(WorkspaceSymbolResponse::Nested(symbols)) = response else {
+        panic!("Expected a nested workspace symbol response");
+    };
+    assert_eq!(symbols.len(), 1000);
+}
